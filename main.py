@@ -2,7 +2,7 @@
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
-Includes VWAP Support & Repeat Alert Tracking.
+Includes Exact VWAP Support & Custom HTML Links for Telegram.
 Runs on GitHub Actions every 10 minutes.
 """
 import json
@@ -21,7 +21,7 @@ NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
 # إعدادات الفلترة والشروط
-MIN_PRICE = 0.70                # تعديل أدنى سعر للسهم إلى 0.70 دولار
+MIN_PRICE = 0.70                # أدنى سعر للسهم
 MIN_TURNOVER = 300_000         # السعر × متوسط الحجم 10 أيام
 TOP_LIMIT = 20                 # متابعة أفضل 20 سهم
 SPIKE_THRESHOLD = 3.0          # قفزة إضافية بـ 3% أو أكثر للسهم نفسه
@@ -71,7 +71,6 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    # إضافة VWAP إلى الأعمدة التقنية
     tech_cols = ["high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
@@ -116,11 +115,13 @@ def save_state(today, state):
 
 
 def send(text):
+    """إرسال الرسالة باستخدام HTML لإظهار الروابط بشكل أنيق."""
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": text,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         },
         timeout=20,
@@ -129,19 +130,21 @@ def send(text):
 
 
 def calculate_levels(price, high, low, ema21, ema50, vwap):
-    """حساب الأهداف ودعوم VWAP الرقمية."""
+    """حساب الأهداف والدعوم اللحظية ودعم VWAP."""
     pivot = (high + low + price) / 3
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
 
-    # الاعتماد على VWAP كدعم رئيسي، وفي حال عدم توفره يتم اللجوء للـ EMA21
-    vwap_support = vwap if vwap > 0 else (ema21 if 0 < ema21 < price else low)
-    
-    # هامش أمان بسيط (0.5%) أسفل الـ VWAP للوقف
-    stop_loss = vwap_support * 0.995 if vwap_support <= price else price * 0.98
+    # الدعم اللحظي التقليدي
+    support_intraday = min(low, ema21 if 0 < ema21 < price else low)
+    # دعم VWAP المباشر
+    vwap_support = vwap if vwap > 0 else support_intraday
+    # الوقف يعتمد على أدنى مستويات الدعم
+    stop_loss = min(support_intraday, vwap_support)
 
     return {
+        "support_intraday": support_intraday,
         "vwap_support": vwap_support,
         "t1": r1,
         "t2": r2,
@@ -182,12 +185,10 @@ def main():
         last_data = state.get(key)
 
         if not last_data:
-            # دخول جديد لـ Top 20
             alert_count = 1
             status_text = "دخول جديد إلى Top 20 🚨"
             new_entries.append((rank, row, status_text, alert_count))
             
-            # حفظ بيانات السهم لأول مرة
             state[key] = {
                 "change": change, 
                 "price": price, 
@@ -198,14 +199,12 @@ def main():
             old_change = last_data["change"]
             alert_count = last_data.get("alert_count", 1)
 
-            # فحص حدوث تسارع في الزخم
             if change - old_change >= SPIKE_THRESHOLD:
                 alert_count += 1
                 spike = change - old_change
                 status_text = f"تسارع زخم مفاجئ (+{spike:.1f}% 📈) [تكرار #{alert_count}]"
                 spike_entries.append((rank, row, status_text, alert_count))
 
-                # تحديث بيانات السهم والعداد
                 state[key] = {
                     "change": change, 
                     "price": price, 
@@ -216,7 +215,7 @@ def main():
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 **تحديث الزخم وTop Gainers** | {SESSION_AR[session]}\n"]
+        lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, alert_count in alerts:
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
@@ -231,11 +230,11 @@ def main():
 
             lvl = calculate_levels(price, high, low, ema21, ema50, vwap)
 
-            lines.append(f"🔥 #{rank} **{ticker}** — {status_title}")
-            lines.append(f"💵 السعر: **{price:.2f}$** | التغير: **{chg:+.1f}%** | Vol: {row[vol_c]:,.0f}")
-            lines.append(f"📈 الشارت: {tv_url}")
-            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
-            lines.append(f"📊 دعم VWAP الرقمي: **{lvl['vwap_support']:.2f}$** | ⛔️ الوقف: **{lvl['stop_loss']:.2f}$**")
+            lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
+            lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {row[vol_c]:,.0f}")
+            lines.append(f"📈 الشارت: <a href=\"{tv_url}\">TradingView</a>")
+            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -> ${lvl['t2']:.2f} -> ${lvl['t3']:.2f} (أقصى: ${lvl['t_max']:.2f})")
+            lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b> | ⛔️ الوقف: ${lvl['stop_loss']:.2f}")
             lines.append("-----------------------------------\n")
 
         send("\n".join(lines))
