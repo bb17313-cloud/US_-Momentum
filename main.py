@@ -3,6 +3,7 @@
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
 Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
+Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
 """
 import json
@@ -69,7 +70,7 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc"]
+    tech_cols = ["high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -126,12 +127,22 @@ def send(text):
     r.raise_for_status()
 
 
-def calculate_levels(price, high, low, ema21, ema50, raw_vwap):
-    """حساب الأهداف والدعوم اللحظية والدقيقة لـ VWAP والوقف بشكل تفاعلي ديناميكي."""
+def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52):
+    """حساب الأهداف والدعوم اللحظية والدقيقة لـ VWAP والوقف بشكل تفاعلي ديناميكي مع قمة 52 أسبوعاً الحقيقية."""
     pivot = (high + low + price) / 3
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
+
+    # اعتماد قمة 52 أسبوعاً الحقيقية كهدف أقصى نظيف
+    if high_52 > 0:
+        if price < high_52:
+            t_max = high_52
+        else:
+            # في حال اختراق السعر لقمة 52 أسبوعاً
+            t_max = max(r3 * 1.08, price * 1.05)
+    else:
+        t_max = r3 * 1.08
 
     # تصحيح الـ VWAP اللحظي
     if raw_vwap < low or raw_vwap > high or raw_vwap == 0:
@@ -156,7 +167,8 @@ def calculate_levels(price, high, low, ema21, ema50, raw_vwap):
         "t1": r1,
         "t2": r2,
         "t3": r3,
-        "t_max": r3 * 1.08,
+        "t_max": t_max,
+        "high_52": high_52,
         "stop_loss": stop_loss,
     }
 
@@ -234,13 +246,14 @@ def main():
             ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
             ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
             raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
+            high_52 = float(row['price_52_week_high']) if 'price_52_week_high' in row and row['price_52_week_high'] else 0.0
 
-            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap)
+            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52)
 
             lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
             lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {row[vol_c]:,.0f}")
             lines.append(f"📈 الشارت: <a href=\"{tv_url}\">TradingView</a>")
-            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -> ${lvl['t2']:.2f} -> ${lvl['t3']:.2f} (أقصى: ${lvl['t_max']:.2f})")
+            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -> ${lvl['t2']:.2f} -> ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
             lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
             lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
             lines.append("-----------------------------------\n")
