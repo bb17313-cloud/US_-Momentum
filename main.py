@@ -1,4 +1,4 @@
-"""US Top Gainers & Sudden Momentum Tracker.
+"""US Top Gainers & Sudden Momentum Tracker with Sectors in Arabic.
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
@@ -10,20 +10,20 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import requests
 from tradingview_screener import Query, col
 
-TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# إعدادات الفلترة والشروط
-MIN_PRICE = 0.70                # تعديل أدنى سعر للسهم إلى 0.70 دولار
-MIN_TURNOVER = 300_000         # السعر × متوسط الحجم 10 أيام (استبعاد الأسهم الميتة)
-TOP_LIMIT = 20                 # متابعة أفضل 20 سهم في نادي Top Gainers
-SPIKE_THRESHOLD = 3.0          # التغير المفاجئ: قفزة إضافية بـ 3% أو أكثر للسهم نفسه
+# إعدادات الفلترة والشروط لأسهم الزخم (Momentum)
+MIN_PRICE = 0.70                # أدنى سعر للسهم
+TOP_LIMIT = 20                 # متابعة أفضل 20 سهم
+SPIKE_THRESHOLD = 3.0          # قفزة زخم إضافية بـ 3% أو أكثر
 
 SESSION_AR = {
     "pre": "قبل الافتتاح (Pre-Market)", 
@@ -35,6 +35,30 @@ DISPLAY = {
     "pre": ("premarket_close", "premarket_change", "premarket_volume"),
     "market": ("close", "change", "volume"),
     "after": ("postmarket_close", "postmarket_change", "postmarket_volume"),
+}
+
+# قاموس ترجمة القطاعات للغة العربية
+SECTORS_AR = {
+    "Technology": "التكنولوجيا 💻",
+    "Health Technology": "التكنولوجيا الصحية 🏥",
+    "Health Services": "الخدمات الصحية ⚕️",
+    "Electronic Technology": "الإلكترونيات والتقنية 🔬",
+    "Finance": "الخدمات المالية 🏦",
+    "Commercial Services": "الخدمات التجارية 💼",
+    "Consumer Durables": "السلع المعمرة 🚗",
+    "Consumer Non-Durables": "السلع الاستهلاكية 🛒",
+    "Consumer Services": "الخدمات الاستهلاكية 🛍️",
+    "Energy Minerals": "الطاقة والمعدن ⛽",
+    "Non-Energy Minerals": "التعدين والمواد ⛏️",
+    "Process Industries": "الصناعات التحويلية 🏭",
+    "Producer Manufacturing": "التصنيع الإنتاجي 🏗️",
+    "Industrial Services": "الخدمات الصناعية 🛠️",
+    "Utilities": "المرافق العامة 💡",
+    "Communications": "الاتصالات والإنترنت 📡",
+    "Transportation": "النقل اللوجستي 🚚",
+    "Distribution Services": "التوزيع واللوجستيات 📦",
+    "Retail Trade": "تجارة التجزئة 🏬",
+    "Miscellaneous": "متنوع 🌐"
 }
 
 
@@ -60,17 +84,18 @@ def get_top_gainers_query(session):
     if session == "pre":
         filters = [col("premarket_close") >= MIN_PRICE, col("premarket_change") > 2.0]
         sort_col = "premarket_change"
-        extra = ["premarket_close", "premarket_change", "premarket_volume"]
+        extra = ["premarket_close", "premarket_change", "premarket_volume", "premarket_high", "premarket_low"]
     elif session == "after":
         filters = [col("postmarket_close") >= MIN_PRICE, col("postmarket_change") > 2.0]
         sort_col = "postmarket_change"
-        extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
+        extra = ["postmarket_close", "postmarket_change", "postmarket_volume", "high", "low"]
     else: # market
         filters = [col("close") >= MIN_PRICE, col("change") > 2.0]
         sort_col = "change"
-        extra = ["close", "change", "volume"]
+        extra = ["close", "change", "volume", "high", "low"]
 
-    tech_cols = ["high", "low", "EMA21", "EMA50", "average_volume_10d_calc"]
+    # طلب حقل sector لمعرفة القطاع + المؤشرات الآمنة
+    tech_cols = ["sector", "EMA21", "EMA50"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -79,22 +104,15 @@ def get_top_gainers_query(session):
         .select(*columns)
         .where(col("type") == "stock", *filters)
         .order_by(sort_col, ascending=False)
-        .limit(100)
+        .limit(TOP_LIMIT)
     )
     return query, sort_col, extra
 
 
 def run_screen(session):
-    query, sort_col, extra = get_top_gainers_query(session)
+    query, _, _ = get_top_gainers_query(session)
     _, df = query.get_scanner_data()
-    if df.empty:
-        return df
-    
-    # استبعاد الأسهم ضعيفة السيولة جداً
-    if "average_volume_10d_calc" in df.columns and "close" in df.columns:
-        df = df[df["close"] * df["average_volume_10d_calc"] > MIN_TURNOVER]
-        
-    return df.head(TOP_LIMIT)
+    return df
 
 
 def load_state():
@@ -115,11 +133,15 @@ def save_state(today, state):
 
 
 def send(text):
+    if not TOKEN or not CHAT_ID:
+        print("BOT_TOKEN or CHAT_ID missing!")
+        return
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": text,
+            "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         },
         timeout=20,
@@ -127,24 +149,35 @@ def send(text):
     r.raise_for_status()
 
 
-def calculate_levels(price, high, low, ema21, ema50):
-    pivot = (high + low + price) / 3
-    r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
-    r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
-    r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
+def calculate_levels(price, high, low, ema21=None):
+    pivot = (high + low + price) / 3 if (high > 0 and low > 0) else price
+    
+    r1 = (2 * pivot) - low if (low > 0 and (2 * pivot - low) > price) else price * 1.03
+    r2 = pivot + (high - low) if (high > low and (pivot + high - low) > r1) else r1 * 1.04
+    r3 = r2 * 1.05
 
-    support_intraday = min(low, ema21 if 0 < ema21 < price else low)
-    support_ilz = min(ema50 if 0 < ema50 < price else support_intraday * 0.98, pivot)
+    if ema21 and 0 < ema21 < price:
+        support_intraday = max(low, ema21)
+    else:
+        support_intraday = low if low > 0 else price * 0.96
 
     return {
         "support_intraday": support_intraday,
-        "support_ilz": support_ilz,
         "t1": r1,
         "t2": r2,
         "t3": r3,
         "t_max": r3 * 1.08,
-        "stop_1": support_intraday * 0.985,
+        "stop_1": support_intraday * 0.98,
     }
+
+
+def safe_float(val, default=0.0):
+    try:
+        if pd.isna(val) or val is None:
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 
 def main():
@@ -153,6 +186,7 @@ def main():
         print("Outside US sessions, nothing to do.")
         return
 
+    print(f"Running session: {session}")
     today, state = load_state()
     price_c, chg_c, vol_c = DISPLAY[session]
 
@@ -162,8 +196,8 @@ def main():
         print(f"[{session}] error fetching data: {e}")
         sys.exit(1)
 
-    if df.empty:
-        print("No Top Gainers found.")
+    if df is None or df.empty:
+        print(f"[{session}] No Top Gainers found.")
         return
 
     new_entries = []
@@ -171,47 +205,55 @@ def main():
 
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
         ticker = str(row['name']).strip()
-        change = float(row[chg_c]) if row[chg_c] else 0.0
-        price = float(row[price_c]) if row[price_c] else 0.0
-        vol = float(row[vol_c]) if row[vol_c] else 0.0
+        change = safe_float(row.get(chg_c))
+        price = safe_float(row.get(price_c))
+
+        if price <= 0:
+            continue
 
         key = f"{session}:{ticker}"
         last_data = state.get(key)
 
         if not last_data:
-            # دخول جديد لقائمة Top 20
             new_entries.append((rank, row, "دخول جديد إلى Top 20 🚨", 0.0))
         else:
             old_change = last_data["change"]
-            # تغير مفاجئ في الزخم (قفزة إضافية)
             if change - old_change >= SPIKE_THRESHOLD:
                 spike = change - old_change
                 spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", old_change))
 
-        # تحديث الحالة الحالية للسهم
         state[key] = {"change": change, "price": price, "rank": rank}
 
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 **تحديث الزخم وTop Gainers** | {SESSION_AR[session]}\n"]
-        for rank, row, status_title, old_chg in alerts:
+        lines = [f"🚨 *تحديث أسهم الزخم Momentum* | {SESSION_AR[session]}\n"]
+        for rank, row, status_title, _ in alerts:
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
-            price = float(row[price_c]) if row[price_c] else 0.0
-            chg = float(row[chg_c]) if row[chg_c] else 0.0
-            high = float(row['high']) if 'high' in row and row['high'] else price * 1.02
-            low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
-            ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
-            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
+            # جلب وتجهيز القطاع بالعربي
+            raw_sector = str(row.get('sector', '')).strip()
+            sector_ar = SECTORS_AR.get(raw_sector, raw_sector if raw_sector else "غير محدد 🌐")
+            
+            price = safe_float(row.get(price_c))
+            chg = safe_float(row.get(chg_c))
+            vol = safe_float(row.get(vol_c))
+            
+            high_key = "premarket_high" if session == "pre" else "high"
+            low_key = "premarket_low" if session == "pre" else "low"
+            
+            high = safe_float(row.get(high_key), price * 1.02)
+            low = safe_float(row.get(low_key), price * 0.98)
+            ema21 = safe_float(row.get('EMA21'), 0.0)
 
-            lvl = calculate_levels(price, high, low, ema21, ema50)
+            lvl = calculate_levels(price, high, low, ema21)
 
-            lines.append(f"🔥 #{rank} **{ticker}** — {status_title}")
-            lines.append(f"💵 السعر: **{price:.2f}$** | التغير: **{chg:+.1f}%** | Vol: {row[vol_c]:,.0f}")
-            lines.append(f"📈 الشارت: {tv_url}")
-            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
+            lines.append(f"🔥 #{rank} *{ticker}* — {status_title}")
+            lines.append(f"🏢 القطاع: *{sector_ar}*")
+            lines.append(f"💵 السعر: *{price:.2f}$* | التغير: *{chg:+.1f}%* | Vol: {vol:,.0f}")
+            lines.append(f"📈 الشارت: [TradingView]({tv_url})")
+            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى: {lvl['t_max']:.2f}$)")
             lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$")
             lines.append("-----------------------------------\n")
 
