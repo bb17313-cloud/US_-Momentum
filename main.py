@@ -117,8 +117,8 @@ def save_state(today, state):
         json.dump({"date": today, "state": state}, f)
 
 
-def send(text):
-    """إرسال الرسالة مع حماية ضد أخطاء Parse Mode HTML."""
+def send_message_chunk(text):
+    """إرسال قطعة نصية واحدة لتيليجرام مع التعامل الذكي مع أخطاء التنسيق."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -126,15 +126,33 @@ def send(text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    
     r = requests.post(url, data=payload, timeout=20)
     
-    # إذا فشل بسبب تنسيق HTML، يتم الإرسال كنص عادي
+    # في حال فشل التنسيق (HTML Error 400)، أرسلها كنص مجرد
     if r.status_code == 400:
         payload.pop("parse_mode")
         r = requests.post(url, data=payload, timeout=20)
         
     r.raise_for_status()
+
+
+def send(text):
+    """تقسيم النص إذا تجاوز 3500 حرف لضمان عدم تجاوز الحد الأقصى لـ Telegram (4096 حرف)."""
+    if len(text) <= 3500:
+        send_message_chunk(text)
+        return
+
+    # تقسيم بالأسطر
+    lines = text.split("\n")
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3500:
+            send_message_chunk(chunk)
+            chunk = line + "\n"
+        else:
+            chunk += line + "\n"
+    if chunk.strip():
+        send_message_chunk(chunk)
 
 
 def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52):
@@ -246,8 +264,9 @@ def main():
     if alerts:
         lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, alert_count, price, chg, vol in alerts:
-            ticker = html.escape(str(row['name']).strip())
-            tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+            raw_ticker = str(row['name']).strip()
+            ticker_escaped = html.escape(raw_ticker)
+            tv_url = f"https://www.tradingview.com/chart/?symbol={raw_ticker}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
@@ -258,10 +277,10 @@ def main():
 
             lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52)
 
-            lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
+            lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
             lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
             lines.append(f"📈 الشارت: <a href=\"{tv_url}\">TradingView</a>")
-            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -&gt; ${lvl['t2']:.2f} -&gt; ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
+            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} ➔ ${lvl['t2']:.2f} ➔ ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
             lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
             lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
             lines.append("-----------------------------------\n")
