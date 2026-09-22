@@ -128,7 +128,6 @@ def send_message_chunk(text):
     }
     r = requests.post(url, data=payload, timeout=20)
     
-    # في حال فشل التنسيق (HTML Error 400)، أرسلها كنص مجرد
     if r.status_code == 400:
         payload.pop("parse_mode")
         r = requests.post(url, data=payload, timeout=20)
@@ -142,7 +141,6 @@ def send(text):
         send_message_chunk(text)
         return
 
-    # تقسيم بالأسطر
     lines = text.split("\n")
     chunk = ""
     for line in lines:
@@ -155,8 +153,8 @@ def send(text):
         send_message_chunk(chunk)
 
 
-def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52):
-    """حساب الأهداف والدعوم اللحظية والدقيقة لـ VWAP والوقف بشكل تفاعلي ديناميكي مع قمة 52 أسبوعاً الحقيقية."""
+def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session):
+    """حساب الأهداف والدعوم اللحظية و VWAP الدقيق والوقف."""
     pivot = (high + low + price) / 3
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
@@ -170,8 +168,10 @@ def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52):
     else:
         t_max = r3 * 1.08
 
-    if raw_vwap < low or raw_vwap > high or raw_vwap == 0:
-        vwap_support = price * 0.96
+    # تصحيح الـ VWAP: في الجلسات الممتدة أو عند انحراف VWAP التداول النظامي عن نطاق السعر اللحظي
+    # يتم حساب الـ Intraday VWAP الدقيق بناءً على النموذج اللحظي (Typical Price)
+    if session in ["pre", "after"] or raw_vwap <= 0 or abs(raw_vwap - price) / price > 0.15:
+        vwap_support = (high + low + (price * 2)) / 4
     else:
         vwap_support = raw_vwap
 
@@ -275,7 +275,7 @@ def main():
             raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] and not (row['VWAP'] != row['VWAP']) else price
             high_52 = float(row['price_52_week_high']) if 'price_52_week_high' in row and row['price_52_week_high'] and not (row['price_52_week_high'] != row['price_52_week_high']) else 0.0
 
-            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52)
+            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
 
             lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
             lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
