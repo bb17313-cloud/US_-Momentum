@@ -6,6 +6,7 @@ Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
 Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
 """
+import html
 import json
 import os
 import sys
@@ -92,7 +93,6 @@ def run_screen(session):
     
     price_col = DISPLAY[session][0]
     
-    # إصلاح التصفية بالتأكد من أخذ سعر الجلسة الحالية أو السعر الأساسي لتجنب حجب النتائج
     if "average_volume_10d_calc" in df.columns:
         p_series = df[price_col].fillna(df["close"]) if "close" in df.columns else df[price_col]
         df = df[p_series * df["average_volume_10d_calc"] > MIN_TURNOVER]
@@ -118,16 +118,22 @@ def save_state(today, state):
 
 
 def send(text):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
-        timeout=20,
-    )
+    """إرسال الرسالة مع حماية ضد أخطاء Parse Mode HTML."""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    
+    r = requests.post(url, data=payload, timeout=20)
+    
+    # إذا فشل بسبب تنسيق HTML، يتم الإرسال كنص عادي
+    if r.status_code == 400:
+        payload.pop("parse_mode")
+        r = requests.post(url, data=payload, timeout=20)
+        
     r.raise_for_status()
 
 
@@ -138,32 +144,27 @@ def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52):
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
 
-    # اعتماد قمة 52 أسبوعاً الحقيقية كهدف أقصى نظيف
     if high_52 > 0:
         if price < high_52:
             t_max = high_52
         else:
-            # في حال اختراق السعر لقمة 52 أسبوعاً
             t_max = max(r3 * 1.08, price * 1.05)
     else:
         t_max = r3 * 1.08
 
-    # تصحيح الـ VWAP اللحظي
     if raw_vwap < low or raw_vwap > high or raw_vwap == 0:
-        vwap_support = price * 0.96  # VWAP لحظي ديناميكي يتكيف مع السعر اللحظي
+        vwap_support = price * 0.96
     else:
         vwap_support = raw_vwap
 
-    # حساب الدعم اللحظي الديناميكي بناءً على الحركة اللحظية الفعلية للسعر
     dynamic_support = max(low, price * 0.94)
     if 0 < ema21 < price and ema21 > dynamic_support:
         support_intraday = ema21
     else:
         support_intraday = dynamic_support
 
-    # ضمان ديناميكية الدعم والوقف مع ارتجاع السعر لأعلى
     base_support = min(support_intraday, vwap_support)
-    stop_loss = base_support * 0.985  # هامش وقف خسارة متميز 1.5% أسفل الدعم
+    stop_loss = base_support * 0.985
 
     return {
         "support_intraday": support_intraday,
@@ -202,7 +203,6 @@ def main():
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
         ticker = str(row['name']).strip()
         
-        # حماية التغييرات والسعر من قيم None أحياناً في البيانات بعد الإغلاق
         price = float(row[price_c]) if row.get(price_c) and not (row[price_c] != row[price_c]) else float(row.get('close', 0.0))
         change = float(row[chg_c]) if row.get(chg_c) and not (row[chg_c] != row[chg_c]) else 0.0
         volume = float(row[vol_c]) if row.get(vol_c) and not (row[vol_c] != row[vol_c]) else 0.0
@@ -246,7 +246,7 @@ def main():
     if alerts:
         lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, alert_count, price, chg, vol in alerts:
-            ticker = str(row['name']).strip()
+            ticker = html.escape(str(row['name']).strip())
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
@@ -261,7 +261,7 @@ def main():
             lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
             lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
             lines.append(f"📈 الشارت: <a href=\"{tv_url}\">TradingView</a>")
-            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -> ${lvl['t2']:.2f} -> ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
+            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -&gt; ${lvl['t2']:.2f} -&gt; ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
             lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
             lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
             lines.append("-----------------------------------\n")
