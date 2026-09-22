@@ -5,7 +5,7 @@ Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
 Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
 Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
-Fixed Telegram App Links via Universal Webull Redirect.
+Fixed Telegram App Links via Universal Webull Redirect & KeyError postmarket_close protection.
 """
 import html
 import json
@@ -66,7 +66,7 @@ def get_top_gainers_query(session):
     elif session == "after":
         filters = [col("postmarket_close") >= MIN_PRICE]
         sort_col = "postmarket_change"
-        extra = ["postmarket_change", "postmarket_volume"]
+        extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
     else: # market
         filters = [col("close") >= MIN_PRICE, col("change") > 2.0]
         sort_col = "change"
@@ -92,7 +92,15 @@ def run_screen(session):
     if df is None or df.empty:
         return df
     
-    price_col = DISPLAY[session][0]
+    price_col, chg_col, vol_col = DISPLAY[session]
+    
+    # حماية من عدم وجود أعمدة معينة في البيانات المرجعة من الفرز
+    if price_col not in df.columns:
+        df[price_col] = df["close"] if "close" in df.columns else 0.0
+    if chg_col not in df.columns:
+        df[chg_col] = df["change"] if "change" in df.columns else 0.0
+    if vol_col not in df.columns:
+        df[vol_col] = df["volume"] if "volume" in df.columns else 0.0
     
     if "average_volume_10d_calc" in df.columns:
         p_series = df[price_col].fillna(df["close"]) if "close" in df.columns else df[price_col]
@@ -221,9 +229,9 @@ def main():
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
         ticker = str(row['name']).strip()
         
-        price = float(row[price_c]) if row.get(price_c) and not (row[price_c] != row[price_c]) else float(row.get('close', 0.0))
-        change = float(row[chg_c]) if row.get(chg_c) and not (row[chg_c] != row[chg_c]) else 0.0
-        volume = float(row[vol_c]) if row.get(vol_c) and not (row[vol_c] != row[vol_c]) else 0.0
+        price = float(row[price_c]) if price_c in row and row[price_c] and not (row[price_c] != row[price_c]) else float(row.get('close', 0.0))
+        change = float(row[chg_c]) if chg_c in row and row[chg_c] and not (row[chg_c] != row[chg_c]) else 0.0
+        volume = float(row[vol_c]) if vol_c in row and row[vol_c] and not (row[vol_c] != row[vol_c]) else 0.0
 
         if price <= 0:
             continue
