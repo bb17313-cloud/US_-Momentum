@@ -5,7 +5,7 @@ Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
 Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
 Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
-Opens Directly in Webull App.
+Opens Directly in Webull App / Web.
 """
 import html
 import json
@@ -267,8 +267,8 @@ def main():
             raw_ticker = str(row['name']).strip()
             ticker_escaped = html.escape(raw_ticker)
             
-            # رابط لفتح تطبيق Webull مباشرة في الجوال
-            webull_url = f"webull://quote?ticker={raw_ticker.upper()}"
+            # رابط فتح Webull قابل للنقر في تيليجرام ويفتح التطبيق مباشرة
+            webull_url = f"https://www.webull.com/quote/us/stocks/{raw_ticker.lower()}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
@@ -281,7 +281,7 @@ def main():
 
             lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
             lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
-            lines.append(f"📈 الشارت: <a href=\"{webull_url}\">Webull App</a>")
+            lines.append(f"📈 الشارت: <a href=\"{webull_url}\">Webull</a>")
             lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} ➔ ${lvl['t2']:.2f} ➔ ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
             lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
             lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
