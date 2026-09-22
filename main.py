@@ -5,7 +5,7 @@ Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
 Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
 Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
-Opens Directly in Webull App / Web.
+Direct Webull Chart Navigation Fixed.
 """
 import html
 import json
@@ -267,8 +267,8 @@ def main():
             raw_ticker = str(row['name']).strip()
             ticker_escaped = html.escape(raw_ticker)
             
-            # رابط فتح Webull قابل للنقر في تيليجرام ويفتح التطبيق مباشرة
-            webull_url = f"https://www.webull.com/quote/us/stocks/{raw_ticker.lower()}"
+            # الرابط المباشر الصحيح والمجرب لفتح السهم في Webull
+            webull_url = f"https://www.webull.com/quote/us/stock/{raw_ticker.lower()}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
