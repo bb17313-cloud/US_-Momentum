@@ -1,0 +1,44 @@
+name: US_Momentum
+
+on:
+  schedule:
+    # every 15 min, 08:00-01:59 UTC (covers 4:00-20:00 New York in summer and winter time)
+    - cron: "*/15 8-23,0-1 * * *"
+  workflow_dispatch:
+    inputs:
+      session:
+        description: "Force a session for testing: pre / market / after (leave empty for automatic)"
+        required: false
+        default: ""
+
+concurrency:
+  group: US_Momentum
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install tradingview-screener requests
+
+      # keeps seen.json between runs so the same tickers are not re-sent all day
+      - name: Restore seen tickers
+        uses: actions/cache@v4
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          FORCE_SESSION: ${{ inputs.session }}
+        run: python main.py
