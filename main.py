@@ -58,11 +58,11 @@ def current_session():
 
 def get_top_gainers_query(session):
     if session == "pre":
-        filters = [col("premarket_close") >= MIN_PRICE, col("premarket_change") > 2.0]
+        filters = [col("premarket_close") >= MIN_PRICE]
         sort_col = "premarket_change"
         extra = ["premarket_close", "premarket_change", "premarket_volume"]
     elif session == "after":
-        filters = [col("postmarket_close") >= MIN_PRICE, col("postmarket_change") > 2.0]
+        filters = [col("postmarket_close") >= MIN_PRICE]
         sort_col = "postmarket_change"
         extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
     else: # market
@@ -70,7 +70,7 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high"]
+    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -87,11 +87,15 @@ def get_top_gainers_query(session):
 def run_screen(session):
     query, sort_col, extra = get_top_gainers_query(session)
     _, df = query.get_scanner_data()
-    if df.empty:
+    if df is None or df.empty:
         return df
     
-    if "average_volume_10d_calc" in df.columns and "close" in df.columns:
-        df = df[df["close"] * df["average_volume_10d_calc"] > MIN_TURNOVER]
+    price_col = DISPLAY[session][0]
+    
+    # إصلاح التصفية بالتأكد من أخذ سعر الجلسة الحالية أو السعر الأساسي لتجنب حجب النتائج
+    if "average_volume_10d_calc" in df.columns:
+        p_series = df[price_col].fillna(df["close"]) if "close" in df.columns else df[price_col]
+        df = df[p_series * df["average_volume_10d_calc"] > MIN_TURNOVER]
         
     return df.head(TOP_LIMIT)
 
@@ -188,8 +192,8 @@ def main():
         print(f"[{session}] error fetching data: {e}")
         sys.exit(1)
 
-    if df.empty:
-        print("No Top Gainers found.")
+    if df is None or df.empty:
+        print(f"[{session}] No Top Gainers found.")
         return
 
     new_entries = []
@@ -197,8 +201,14 @@ def main():
 
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
         ticker = str(row['name']).strip()
-        change = float(row[chg_c]) if row[chg_c] else 0.0
-        price = float(row[price_c]) if row[price_c] else 0.0
+        
+        # حماية التغييرات والسعر من قيم None أحياناً في البيانات بعد الإغلاق
+        price = float(row[price_c]) if row.get(price_c) and not (row[price_c] != row[price_c]) else float(row.get('close', 0.0))
+        change = float(row[chg_c]) if row.get(chg_c) and not (row[chg_c] != row[chg_c]) else 0.0
+        volume = float(row[vol_c]) if row.get(vol_c) and not (row[vol_c] != row[vol_c]) else 0.0
+
+        if price <= 0:
+            continue
 
         key = f"{session}:{ticker}"
         last_data = state.get(key)
@@ -206,7 +216,7 @@ def main():
         if not last_data:
             alert_count = 1
             status_text = "دخول جديد إلى Top 20 🚨"
-            new_entries.append((rank, row, status_text, alert_count))
+            new_entries.append((rank, row, status_text, alert_count, price, change, volume))
             
             state[key] = {
                 "change": change, 
@@ -222,7 +232,7 @@ def main():
                 alert_count += 1
                 spike = change - old_change
                 status_text = f"تسارع زخم مفاجئ (+{spike:.1f}% 📈) [تكرار #{alert_count}]"
-                spike_entries.append((rank, row, status_text, alert_count))
+                spike_entries.append((rank, row, status_text, alert_count, price, change, volume))
 
                 state[key] = {
                     "change": change, 
@@ -235,23 +245,21 @@ def main():
 
     if alerts:
         lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
-        for rank, row, status_title, alert_count in alerts:
+        for rank, row, status_title, alert_count, price, chg, vol in alerts:
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
-            price = float(row[price_c]) if row[price_c] else 0.0
-            chg = float(row[chg_c]) if row[chg_c] else 0.0
-            high = float(row['high']) if 'high' in row and row['high'] else price * 1.02
-            low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
-            ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
-            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
-            raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
-            high_52 = float(row['price_52_week_high']) if 'price_52_week_high' in row and row['price_52_week_high'] else 0.0
+            high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
+            low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
+            ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] and not (row['EMA21'] != row['EMA21']) else price * 0.99
+            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] and not (row['EMA50'] != row['EMA50']) else price * 0.97
+            raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] and not (row['VWAP'] != row['VWAP']) else price
+            high_52 = float(row['price_52_week_high']) if 'price_52_week_high' in row and row['price_52_week_high'] and not (row['price_52_week_high'] != row['price_52_week_high']) else 0.0
 
             lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52)
 
             lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
-            lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {row[vol_c]:,.0f}")
+            lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
             lines.append(f"📈 الشارت: <a href=\"{tv_url}\">TradingView</a>")
             lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -> ${lvl['t2']:.2f} -> ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
             lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
