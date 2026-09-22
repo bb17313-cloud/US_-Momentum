@@ -2,7 +2,7 @@
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
-Includes Exact VWAP Support & Custom HTML Links for Telegram.
+Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
 Runs on GitHub Actions every 10 minutes.
 """
 import json
@@ -20,7 +20,6 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# إعدادات الفلترة والشروط
 MIN_PRICE = 0.70                # أدنى سعر للسهم
 MIN_TURNOVER = 300_000         # السعر × متوسط الحجم 10 أيام
 TOP_LIMIT = 20                 # متابعة أفضل 20 سهم
@@ -57,7 +56,6 @@ def current_session():
 
 
 def get_top_gainers_query(session):
-    """جلب ماسح Top Gainers المباشر لـ TradingView متضمناً VWAP."""
     if session == "pre":
         filters = [col("premarket_close") >= MIN_PRICE, col("premarket_change") > 2.0]
         sort_col = "premarket_change"
@@ -115,7 +113,6 @@ def save_state(today, state):
 
 
 def send(text):
-    """إرسال الرسالة باستخدام HTML لإظهار الروابط بشكل أنيق."""
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data={
@@ -129,19 +126,26 @@ def send(text):
     r.raise_for_status()
 
 
-def calculate_levels(price, high, low, ema21, ema50, vwap):
-    """حساب الأهداف والدعوم اللحظية ودعم VWAP."""
+def calculate_levels(price, high, low, ema21, ema50, raw_vwap):
+    """حساب الأهداف والدعوم اللحظية والدقيقة لـ VWAP والوقف."""
     pivot = (high + low + price) / 3
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
 
-    # الدعم اللحظي التقليدي
+    # تصحيح الـ VWAP اللحظي: إذا كانت قيمة السكريبر بعيدة جداً عن مدى الشمعة اللحظية (High/Low)
+    # يتم تصحيحها لتعكس متوسط الحركة اللحظية الفعلية للشارت
+    if raw_vwap < low or raw_vwap > high:
+        vwap_support = (high + low + price) / 3
+    else:
+        vwap_support = raw_vwap
+
+    # الدعم اللحظي
     support_intraday = min(low, ema21 if 0 < ema21 < price else low)
-    # دعم VWAP المباشر
-    vwap_support = vwap if vwap > 0 else support_intraday
-    # الوقف يعتمد على أدنى مستويات الدعم
-    stop_loss = min(support_intraday, vwap_support)
+    
+    # ضمان عدم تطابق الوقف مع الدعم: الوقف يكون أسفل أقرب دعم بـ 1.5%
+    base_support = min(support_intraday, vwap_support)
+    stop_loss = base_support * 0.985  # هامش وقف خسارة متميز 1.5% أسفل الدعم
 
     return {
         "support_intraday": support_intraday,
@@ -226,15 +230,16 @@ def main():
             low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
             ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
             ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
-            vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
+            raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
 
-            lvl = calculate_levels(price, high, low, ema21, ema50, vwap)
+            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap)
 
             lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
             lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {row[vol_c]:,.0f}")
             lines.append(f"📈 الشارت: <a href=\"{tv_url}\">TradingView</a>")
             lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} -> ${lvl['t2']:.2f} -> ${lvl['t3']:.2f} (أقصى: ${lvl['t_max']:.2f})")
-            lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b> | ⛔️ الوقف: ${lvl['stop_loss']:.2f}")
+            lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
+            lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
             lines.append("-----------------------------------\n")
 
         send("\n".join(lines))
