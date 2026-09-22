@@ -94,7 +94,6 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume", "high", "low"]
 
-    # طلب حقل sector لمعرفة القطاع + المؤشرات الآمنة
     tech_cols = ["sector", "EMA21", "EMA50"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
@@ -141,11 +140,13 @@ def send(text):
         data={
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         },
         timeout=20,
     )
+    if not r.ok:
+        print(f"Telegram Response: {r.text}")
     r.raise_for_status()
 
 
@@ -227,12 +228,11 @@ def main():
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 *تحديث أسهم الزخم Momentum* | {SESSION_AR[session]}\n"]
+        lines = [f"🚨 <b>تحديث أسهم الزخم Momentum</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, _ in alerts:
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
-            # جلب وتجهيز القطاع بالعربي
             raw_sector = str(row.get('sector', '')).strip()
             sector_ar = SECTORS_AR.get(raw_sector, raw_sector if raw_sector else "غير محدد 🌐")
             
@@ -249,10 +249,10 @@ def main():
 
             lvl = calculate_levels(price, high, low, ema21)
 
-            lines.append(f"🔥 #{rank} *{ticker}* — {status_title}")
-            lines.append(f"🏢 القطاع: *{sector_ar}*")
-            lines.append(f"💵 السعر: *{price:.2f}$* | التغير: *{chg:+.1f}%* | Vol: {vol:,.0f}")
-            lines.append(f"📈 الشارت: [TradingView]({tv_url})")
+            lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
+            lines.append(f"🏢 القطاع: <b>{sector_ar}</b>")
+            lines.append(f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol:,.0f}")
+            lines.append(f'📈 الشارت: <a href="{tv_url}">TradingView</a>')
             lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى: {lvl['t_max']:.2f}$)")
             lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$")
             lines.append("-----------------------------------\n")
