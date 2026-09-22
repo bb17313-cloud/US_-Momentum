@@ -127,23 +127,26 @@ def send(text):
 
 
 def calculate_levels(price, high, low, ema21, ema50, raw_vwap):
-    """حساب الأهداف والدعوم اللحظية والدقيقة لـ VWAP والوقف."""
+    """حساب الأهداف والدعوم اللحظية والدقيقة لـ VWAP والوقف بشكل تفاعلي ديناميكي."""
     pivot = (high + low + price) / 3
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
 
-    # تصحيح الـ VWAP اللحظي: إذا كانت قيمة السكريبر بعيدة جداً عن مدى الشمعة اللحظية (High/Low)
-    # يتم تصحيحها لتعكس متوسط الحركة اللحظية الفعلية للشارت
-    if raw_vwap < low or raw_vwap > high:
-        vwap_support = (high + low + price) / 3
+    # تصحيح الـ VWAP اللحظي
+    if raw_vwap < low or raw_vwap > high or raw_vwap == 0:
+        vwap_support = price * 0.96  # VWAP لحظي ديناميكي يتكيف مع السعر اللحظي
     else:
         vwap_support = raw_vwap
 
-    # الدعم اللحظي
-    support_intraday = min(low, ema21 if 0 < ema21 < price else low)
-    
-    # ضمان عدم تطابق الوقف مع الدعم: الوقف يكون أسفل أقرب دعم بـ 1.5%
+    # حساب الدعم اللحظي الديناميكي بناءً على الحركة اللحظية الفعلية للسعر
+    dynamic_support = max(low, price * 0.94)
+    if 0 < ema21 < price and ema21 > dynamic_support:
+        support_intraday = ema21
+    else:
+        support_intraday = dynamic_support
+
+    # ضمان ديناميكية الدعم والوقف مع ارتجاع السعر لأعلى
     base_support = min(support_intraday, vwap_support)
     stop_loss = base_support * 0.985  # هامش وقف خسارة متميز 1.5% أسفل الدعم
 
