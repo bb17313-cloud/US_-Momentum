@@ -168,8 +168,7 @@ def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
     else:
         t_max = r3 * 1.08
 
-    # تصحيح الـ VWAP: في الجلسات الممتدة أو عند انحراف VWAP التداول النظامي عن نطاق السعر اللحظي
-    # يتم حساب الـ Intraday VWAP الدقيق بناءً على النموذج اللحظي (Typical Price)
+    # حساب الـ VWAP الدقيق بحسب الجلسة والسعر اللحظي الفعلي
     if session in ["pre", "after"] or raw_vwap <= 0 or abs(raw_vwap - price) / price > 0.15:
         vwap_support = (high + low + (price * 2)) / 4
     else:
@@ -275,6 +274,7 @@ def main():
             raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] and not (row['VWAP'] != row['VWAP']) else price
             high_52 = float(row['price_52_week_high']) if 'price_52_week_high' in row and row['price_52_week_high'] and not (row['price_52_week_high'] != row['price_52_week_high']) else 0.0
 
+            # تم تصحيح استدعاء الدالة بتمرير session
             lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
 
             lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
