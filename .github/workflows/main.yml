@@ -2,8 +2,8 @@ name: US_Momentum
 
 on:
   schedule:
-    # every 15 min, 08:00-01:59 UTC (covers 4:00-20:00 New York in summer and winter time)
-    - cron: "*/15 8-23,0-1 * * *"
+    # يعمل كل 5 دقائق، بين الساعة 08:00 إلى 01:59 UTC (يغطي جميع جلسات نيويورك)
+    - cron: "*/5 8-23,0-1 * * *"
   workflow_dispatch:
     inputs:
       session:
@@ -28,13 +28,14 @@ jobs:
       - name: Install dependencies
         run: pip install tradingview-screener requests
 
-      # keeps seen.json between runs so the same tickers are not re-sent all day
+      # استعادة ملف الأسهم المنبه عليها سابقاً
       - name: Restore seen tickers
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: seen.json
-          key: seen-${{ github.run_id }}
-          restore-keys: seen-
+          key: seen-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            seen-${{ runner.os }}-
 
       - name: Run bot
         env:
@@ -42,3 +43,11 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           FORCE_SESSION: ${{ inputs.session }}
         run: python main.py
+
+      # حفظ حالة الملف لتحديث قائمة الأسهم للجلسة القادمة
+      - name: Save seen tickers
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen.json
+          key: seen-${{ runner.os }}-${{ github.run_id }}
