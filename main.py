@@ -228,7 +228,9 @@ def main():
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 <b>تحديث أسهم الزخم Momentum</b> | {SESSION_AR[session]}\n"]
+        header = f"🚨 <b>تحديث أسهم الزخم Momentum</b> | {SESSION_AR[session]}\n\n"
+        current_chunk = header
+
         for rank, row, status_title, _ in alerts:
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
@@ -249,15 +251,26 @@ def main():
 
             lvl = calculate_levels(price, high, low, ema21)
 
-            lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title}")
-            lines.append(f"🏢 القطاع: <b>{sector_ar}</b>")
-            lines.append(f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol:,.0f}")
-            lines.append(f'📈 الشارت: <a href="{tv_url}">TradingView</a>')
-            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى: {lvl['t_max']:.2f}$)")
-            lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$")
-            lines.append("-----------------------------------\n")
+            item_text = (
+                f"🔥 #{rank} <b>{ticker}</b> — {status_title}\n"
+                f"🏢 القطاع: <b>{sector_ar}</b>\n"
+                f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol:,.0f}\n"
+                f'📈 الشارت: <a href="{tv_url}">TradingView</a>\n'
+                f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى: {lvl['t_max']:.2f}$)\n"
+                f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$\n"
+                "-----------------------------------\n\n"
+            )
 
-        send("\n".join(lines))
+            # إذا كانت إضافة التنبيه الجديد ستتجاوز 3500 حرف، قم بإرسال الدفعة الحالية وافتح دفعة جديدة
+            if len(current_chunk) + len(item_text) > 3500:
+                send(current_chunk)
+                current_chunk = header + item_text
+            else:
+                current_chunk += item_text
+
+        if current_chunk.strip():
+            send(current_chunk)
+
         print(f"[{session}] Sent {len(alerts)} alerts.")
     else:
         print(f"[{session}] Top 20 checked, no new entries or sudden spikes.")
