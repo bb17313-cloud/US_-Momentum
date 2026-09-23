@@ -3,6 +3,7 @@
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
 Includes Sector, Hyperlinked TradingView text, Repeat count, and Real VWAP.
+Excludes OTC / Pink Sheets stocks completely.
 """
 import html
 import json
@@ -27,6 +28,9 @@ MIN_VOL = 30_000                # السيولة والحجم من 30 ألف و�
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
 SLEEP_INTERVAL = 60            # زمن الانتظار بين كل فحص وفحص (60 ثانية = دقيقة واحدة)
+
+# البورصات الرسمية المسموح بها فقط (استبعاد OTC)
+VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
 SESSION_AR = {
     "pre": "قبل الافتتاح (Pre-Market)", 
@@ -59,12 +63,16 @@ def current_session():
 
 
 def get_top_gainers_query(session):
-    """جلب ماسح Top Gainers المباشر لـ TradingView مع القطاع و VWAP لـ 100 سهم."""
+    """جلب ماسح Top Gainers المباشر لـ TradingView مع القطاع و VWAP لـ 100 سهم واستبعاد أسهم OTC."""
+    # شرط استبعاد OTC بالاعتماد على البورصات الرسمية الرئيسية فقط
+    exchange_filter = col("exchange").isin(VALID_EXCHANGES)
+
     if session == "pre":
         filters = [
             col("premarket_close") > MIN_PRICE, 
             col("premarket_change") > 0.0,
-            col("premarket_volume") >= MIN_VOL
+            col("premarket_volume") >= MIN_VOL,
+            exchange_filter
         ]
         sort_col = "premarket_change"
         extra = ["premarket_close", "premarket_change", "premarket_volume"]
@@ -72,7 +80,8 @@ def get_top_gainers_query(session):
         filters = [
             col("postmarket_close") > MIN_PRICE, 
             col("postmarket_change") > 0.0,
-            col("postmarket_volume") >= MIN_VOL
+            col("postmarket_volume") >= MIN_VOL,
+            exchange_filter
         ]
         sort_col = "postmarket_change"
         extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
@@ -80,7 +89,8 @@ def get_top_gainers_query(session):
         filters = [
             col("close") > MIN_PRICE, 
             col("change") > 0.0,
-            col("volume") >= 1000
+            col("volume") >= 1000,
+            exchange_filter
         ]
         sort_col = "change"
         extra = ["close", "change", "volume"]
@@ -205,7 +215,7 @@ def check_and_alert():
         print(f"[{session}] No Top Gainers found.")
         return
 
-    print(f"[{datetime.now(NY).strftime('%H:%M:%S')}] [{session}] Fetched {len(df)} rows.")
+    print(f"[{datetime.now(NY).strftime('%H:%M:%S')}] [{session}] Fetched {len(df)} non-OTC rows.")
 
     new_entries = []
     spike_entries = []
@@ -280,7 +290,7 @@ def check_and_alert():
 
 
 def main():
-    print("Bot started with 1-minute continuous loop...")
+    print("Bot started with 1-minute continuous loop (No OTC)...")
     while True:
         try:
             check_and_alert()
