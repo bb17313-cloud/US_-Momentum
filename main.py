@@ -23,8 +23,8 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-MIN_PRICE = 0.70                # أدنى سعر للسهم
-MIN_TURNOVER = 300_000         # السعر × متوسط الحجم 10 أيام
+MIN_PRICE = 0.65                # أدنى سعر للسهم
+MIN_TODAY_LIQUIDITY = 50_000   # سيولة اليوم (السعر × حجم الجلسة) بالدولار
 TOP_LIMIT = 20                 # متابعة أفضل 20 سهم
 SPIKE_THRESHOLD = 3.0          # قفزة إضافية بـ 3% أو أكثر للسهم نفسه
 
@@ -72,7 +72,7 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high"]
+    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "price_52_week_high"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -102,9 +102,10 @@ def run_screen(session):
     if vol_col not in df.columns:
         df[vol_col] = df["volume"] if "volume" in df.columns else 0.0
 
-    if "average_volume_10d_calc" in df.columns:
-        p_series = df[price_col].fillna(df["close"]) if "close" in df.columns else df[price_col]
-        df = df[p_series * df["average_volume_10d_calc"] > MIN_TURNOVER]
+    # سيولة اليوم للجلسة الحالية: السعر × حجم الجلسة >= 50,000 دولار
+    p_series = df[price_col].fillna(0)
+    v_series = df[vol_col].fillna(0)
+    df = df[(p_series * v_series) >= MIN_TODAY_LIQUIDITY]
 
     return df.head(TOP_LIMIT)
 
