@@ -40,7 +40,6 @@ DISPLAY = {
     "after": ("postmarket_close", "postmarket_change", "postmarket_volume"),
 }
 
-
 def current_session():
     forced = os.environ.get("FORCE_SESSION", "").strip()
     if forced in DISPLAY:
@@ -57,7 +56,6 @@ def current_session():
         return "after"
     return None
 
-
 def get_top_gainers_query(session):
     if session == "pre":
         filters = [col("premarket_close") >= MIN_PRICE]
@@ -72,7 +70,9 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high"]
+    # NOTE: "exchange" added here only — needed to build a correct, working
+    # Webull quote-page link (https://www.webull.com/quote/{exchange}-{ticker}).
+    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high", "exchange"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -84,7 +84,6 @@ def get_top_gainers_query(session):
         .limit(100)
     )
     return query, sort_col, extra
-
 
 def run_screen(session):
     query, sort_col, extra = get_top_gainers_query(session)
@@ -108,7 +107,6 @@ def run_screen(session):
         
     return df.head(TOP_LIMIT)
 
-
 def load_state():
     today = datetime.now(NY).strftime("%Y-%m-%d")
     try:
@@ -120,11 +118,9 @@ def load_state():
         pass
     return today, {}
 
-
 def save_state(today, state):
     with open(SEEN_FILE, "w") as f:
         json.dump({"date": today, "state": state}, f)
-
 
 def send_message_chunk(text):
     """إرسال قطعة نصية واحدة لتيليجرام مع التعامل الذكي مع أخطاء التنسيق."""
@@ -143,7 +139,6 @@ def send_message_chunk(text):
         
     r.raise_for_status()
 
-
 def send(text):
     """تقسيم النص إذا تجاوز 3500 حرف لضمان عدم تجاوز الحد الأقصى لـ Telegram (4096 حرف)."""
     if len(text) <= 3500:
@@ -160,7 +155,6 @@ def send(text):
             chunk += line + "\n"
     if chunk.strip():
         send_message_chunk(chunk)
-
 
 def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session):
     """حساب الأهداف والدعوم اللحظية و VWAP الدقيق والوقف."""
@@ -202,7 +196,6 @@ def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
         "high_52": high_52,
         "stop_loss": stop_loss,
     }
-
 
 def main():
     session = current_session()
@@ -274,9 +267,13 @@ def main():
         for rank, row, status_title, alert_count, price, chg, vol in alerts:
             raw_ticker = str(row['name']).strip().upper()
             ticker_escaped = html.escape(raw_ticker)
-            
-            # رابط سهم Webull نفسه لفتح شارت السهم المرسل
-            webull_url = f"https://www.webull.com/quote/nasdaq-{raw_ticker.lower()}"
+
+            # الرابط الرسمي والصحيح لصفحة السهم في Webull: يفتح في المتصفح
+            # وسيفتح داخل تطبيق Webull تلقائياً إن كان مثبتاً (Universal Link).
+            # تم التحقق من هذا التنسيق مباشرة من موقع webull.com.
+            exchange_raw = row.get('exchange') if 'exchange' in row else None
+            exchange = str(exchange_raw).strip().lower() if exchange_raw and str(exchange_raw).strip() else "nasdaq"
+            webull_url = f"https://www.webull.com/quote/{exchange}-{raw_ticker.lower()}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
@@ -301,7 +298,6 @@ def main():
         print(f"[{session}] Top 20 checked, no new entries or sudden spikes.")
 
     save_state(today, state)
-
 
 if __name__ == "__main__":
     main()
