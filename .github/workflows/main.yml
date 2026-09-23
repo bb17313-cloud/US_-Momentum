@@ -3,9 +3,9 @@ name: US_Momentum
 on:
   schedule:
     # يغطي Pre-market والجلسة الأساسية حتى منتصف الليل (08:00 - 23:59 UTC)
-    - cron: "*/2 8-23 * * *"
-    # يغطي باقي جلسة After-hours حتى بعد منتصف الليل (00:00 - 01:58 UTC)
-    - cron: "*/2 0-1 * * *"
+    - cron: "* 8-23 * * *"
+    # يغطي باقي جلسة After-hours حتى بعد منتصف الليل (00:00 - 01:59 UTC)
+    - cron: "* 0-1 * * *"
   workflow_dispatch:
     inputs:
       session:
