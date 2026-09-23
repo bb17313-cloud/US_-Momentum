@@ -8,6 +8,7 @@ import html
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,7 @@ MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
+SLEEP_INTERVAL = 60            # زمن الانتظار بين كل فحص وفحص (60 ثانية = دقيقة واحدة)
 
 SESSION_AR = {
     "pre": "قبل الافتتاح (Pre-Market)", 
@@ -145,7 +147,6 @@ def send_alerts_in_batches(header, alert_blocks):
     current_message = header + "\n\n"
     
     for block in alert_blocks:
-        # إذا تجاوزت الرسالة مع السهم الجديد الحد الآمن (3000 حرف)، أرسل الحالية وابدأ واحدة جديدة
         if len(current_message) + len(block) > 3000:
             send_single_message(current_message)
             current_message = header + " (تابع)\n\n" + block + "\n-----------------------------------\n"
@@ -185,10 +186,10 @@ def safe_float(val, default=0.0):
         return default
 
 
-def main():
+def check_and_alert():
     session = current_session()
     if not session:
-        print("Outside US sessions, nothing to do.")
+        print("Outside US sessions, skipping check.")
         return
 
     today, state = load_state()
@@ -198,13 +199,13 @@ def main():
         df = run_screen(session)
     except Exception as e:
         print(f"[{session}] Error fetching data: {e}")
-        sys.exit(1)
+        return
 
     if df is None or df.empty:
         print(f"[{session}] No Top Gainers found.")
         return
 
-    print(f"[{session}] Fetched {len(df)} rows from Top {SCAN_LIMIT} successfully.")
+    print(f"[{datetime.now(NY).strftime('%H:%M:%S')}] [{session}] Fetched {len(df)} rows.")
 
     new_entries = []
     spike_entries = []
@@ -276,6 +277,18 @@ def main():
         print(f"[{session}] Checked Top {SCAN_LIMIT}, no new entries or sudden spikes.")
 
     save_state(today, state)
+
+
+def main():
+    print("Bot started with 1-minute continuous loop...")
+    while True:
+        try:
+            check_and_alert()
+        except Exception as e:
+            print(f"Error during check: {e}")
+        
+        # الانتظار لمدة دقيقة واحدة قبل الفحص التالي
+        time.sleep(SLEEP_INTERVAL)
 
 
 if __name__ == "__main__":
