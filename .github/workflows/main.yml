@@ -1,55 +1,35 @@
-name: US_Momentum
+name: US Momentum Tracker
 
 on:
   schedule:
-    # يغطي Pre-market والجلسة الأساسية حتى منتصف الليل (08:00 - 23:59 UTC)
-    - cron: "* 8-23 * * *"
-    # يغطي باقي جلسة After-hours حتى بعد منتصف الليل (00:00 - 01:59 UTC)
-    - cron: "* 0-1 * * *"
-  workflow_dispatch:
-    inputs:
-      session:
-        description: "Force a session for testing: pre / market / after (leave empty for automatic)"
-        required: false
-        default: ""
+    # تشغيل تلقائي كل 5 دقائق
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # يتيح لك التشغيل اليدوي أيضاً
 
+# هذه الخاصية تقوم بإلغاء التشغيل القديم فور رفع تحديث جديد
 concurrency:
-  group: US_Momentum
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.10'
 
-      - name: Install dependencies
-        run: pip install tradingview-screener requests
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests tradingview-screener
 
-      # استعادة ملف الأسهم المنبه عليها سابقاً
-      - name: Restore seen tickers
-        uses: actions/cache/restore@v4
-        with:
-          path: seen.json
-          key: seen-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            seen-${{ runner.os }}-
-
-      - name: Run bot
+      - name: Run Momentum Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          FORCE_SESSION: ${{ inputs.session }}
         run: python main.py
-
-      # حفظ حالة الملف لتحديث قائمة الأسهم للجلسة القادمة
-      - name: Save seen tickers
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: seen.json
-          key: seen-${{ runner.os }}-${{ github.run_id }}
