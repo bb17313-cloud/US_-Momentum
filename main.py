@@ -70,9 +70,7 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    # NOTE: "exchange" added here only — needed to build a correct, working
-    # Webull quote-page link (https://www.webull.com/quote/{exchange}-{ticker}).
-    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high", "exchange"]
+    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "average_volume_10d_calc", "price_52_week_high"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -267,37 +265,13 @@ def main():
         for rank, row, status_title, alert_count, price, chg, vol in alerts:
             raw_ticker = str(row['name']).strip().upper()
             ticker_escaped = html.escape(raw_ticker)
-
-            # الرابط الرسمي والصحيح لصفحة السهم في Webull: يفتح في المتصفح
-            # وسيفتح داخل تطبيق Webull تلقائياً إن كان مثبتاً (Universal Link).
-            # تم التحقق من هذا التنسيق مباشرة من موقع webull.com.
-            exchange_raw = row.get('exchange') if 'exchange' in row else None
-            exchange = str(exchange_raw).strip().lower() if exchange_raw and str(exchange_raw).strip() else "nasdaq"
-            webull_url = f"https://www.webull.com/quote/{exchange}-{raw_ticker.lower()}"
+            
+            # الرابط الرسمي لصفحة الاقتباس/الشارت في Webull (يفتح الشارت + يفتح التطبيق على الجوال إن وُجد)
+            webull_url = f"https://www.webull.com/quote/nasdaq-{raw_ticker}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
             ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] and not (row['EMA21'] != row['EMA21']) else price * 0.99
             ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] and not (row['EMA50'] != row['EMA50']) else price * 0.97
             raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] and not (row['VWAP'] != row['VWAP']) else price
-            high_52 = float(row['price_52_week_high']) if 'price_52_week_high' in row and row['price_52_week_high'] and not (row['price_52_week_high'] != row['price_52_week_high']) else 0.0
-
-            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
-
-            lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
-            lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
-            lines.append(f"📈 الشارت: <a href=\"{webull_url}\">Webull App</a>")
-            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} ➔ ${lvl['t2']:.2f} ➔ ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
-            lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
-            lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
-            lines.append("-----------------------------------\n")
-
-        send("\n".join(lines))
-        print(f"[{session}] Sent {len(alerts)} alerts.")
-    else:
-        print(f"[{session}] Top 20 checked, no new entries or sudden spikes.")
-
-    save_state(today, state)
-
-if __name__ == "__main__":
-    main()
+            high_52 = float(row['price_52_week
