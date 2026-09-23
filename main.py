@@ -275,8 +275,8 @@ def main():
             raw_ticker = str(row['name']).strip().upper()
             ticker_escaped = html.escape(raw_ticker)
             
-            # الرابط الرسمي لنظام توجيه تطبيق Webull المباشر على الآيفون (a.webull.com)
-            webull_url = f"https://a.webull.com/i/{raw_ticker}"
+            # رابط سهم Webull نفسه لفتح شارت السهم المرسل
+            webull_url = f"https://www.webull.com/quote/nasdaq-{raw_ticker.lower()}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
