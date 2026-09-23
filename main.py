@@ -29,8 +29,8 @@ TOP_LIMIT = 20                 # متابعة أفضل 20 سهم
 SPIKE_THRESHOLD = 3.0          # قفزة إضافية بـ 3% أو أكثر للسهم نفسه
 
 SESSION_AR = {
-    "pre": "قبل الافتتاح (Pre-Market)", 
-    "market": "الجلسة النظامية (Market)", 
+    "pre": "قبل الافتتاح (Pre-Market)",
+    "market": "الجلسة النظامية (Market)",
     "after": "بعد الإغلاق (After-Hours)"
 }
 
@@ -39,6 +39,7 @@ DISPLAY = {
     "market": ("close", "change", "volume"),
     "after": ("postmarket_close", "postmarket_change", "postmarket_volume"),
 }
+
 
 def current_session():
     forced = os.environ.get("FORCE_SESSION", "").strip()
@@ -56,6 +57,7 @@ def current_session():
         return "after"
     return None
 
+
 def get_top_gainers_query(session):
     if session == "pre":
         filters = [col("premarket_close") >= MIN_PRICE]
@@ -65,7 +67,7 @@ def get_top_gainers_query(session):
         filters = [col("postmarket_close") >= MIN_PRICE]
         sort_col = "postmarket_change"
         extra = ["postmarket_change", "postmarket_volume"]
-    else: # market
+    else:  # market
         filters = [col("close") >= MIN_PRICE, col("change") > 2.0]
         sort_col = "change"
         extra = ["close", "change", "volume"]
@@ -83,14 +85,15 @@ def get_top_gainers_query(session):
     )
     return query, sort_col, extra
 
+
 def run_screen(session):
     query, sort_col, extra = get_top_gainers_query(session)
     _, df = query.get_scanner_data()
     if df is None or df.empty:
         return df
-    
+
     price_col, chg_col, vol_col = DISPLAY[session]
-    
+
     # حماية من عدم وجود أعمدة معينة في البيانات المرجعة من الفرز
     if price_col not in df.columns:
         df[price_col] = df["close"] if "close" in df.columns else 0.0
@@ -98,12 +101,13 @@ def run_screen(session):
         df[chg_col] = df["change"] if "change" in df.columns else 0.0
     if vol_col not in df.columns:
         df[vol_col] = df["volume"] if "volume" in df.columns else 0.0
-    
+
     if "average_volume_10d_calc" in df.columns:
         p_series = df[price_col].fillna(df["close"]) if "close" in df.columns else df[price_col]
         df = df[p_series * df["average_volume_10d_calc"] > MIN_TURNOVER]
-        
+
     return df.head(TOP_LIMIT)
+
 
 def load_state():
     today = datetime.now(NY).strftime("%Y-%m-%d")
@@ -116,9 +120,11 @@ def load_state():
         pass
     return today, {}
 
+
 def save_state(today, state):
     with open(SEEN_FILE, "w") as f:
         json.dump({"date": today, "state": state}, f)
+
 
 def send_message_chunk(text):
     """إرسال قطعة نصية واحدة لتيليجرام مع التعامل الذكي مع أخطاء التنسيق."""
@@ -130,12 +136,13 @@ def send_message_chunk(text):
         "disable_web_page_preview": True,
     }
     r = requests.post(url, data=payload, timeout=20)
-    
+
     if r.status_code == 400:
         payload.pop("parse_mode")
         r = requests.post(url, data=payload, timeout=20)
-        
+
     r.raise_for_status()
+
 
 def send(text):
     """تقسيم النص إذا تجاوز 3500 حرف لضمان عدم تجاوز الحد الأقصى لـ Telegram (4096 حرف)."""
@@ -153,6 +160,7 @@ def send(text):
             chunk += line + "\n"
     if chunk.strip():
         send_message_chunk(chunk)
+
 
 def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session):
     """حساب الأهداف والدعوم اللحظية و VWAP الدقيق والوقف."""
@@ -195,6 +203,7 @@ def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
         "stop_loss": stop_loss,
     }
 
+
 def main():
     session = current_session()
     if not session:
@@ -218,9 +227,9 @@ def main():
     spike_entries = []
 
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
-        ticker = str(row['name']).strip()
-        
-        price = float(row[price_c]) if price_c in row and row[price_c] and not (row[price_c] != row[price_c]) else float(row.get('close', 0.0))
+        ticker = str(row["name"]).strip()
+
+        price = float(row[price_c]) if price_c in row and row[price_c] and not (row[price_c] != row[price_c]) else float(row.get("close", 0.0))
         change = float(row[chg_c]) if chg_c in row and row[chg_c] and not (row[chg_c] != row[chg_c]) else 0.0
         volume = float(row[vol_c]) if vol_c in row and row[vol_c] and not (row[vol_c] != row[vol_c]) else 0.0
 
@@ -234,12 +243,12 @@ def main():
             alert_count = 1
             status_text = "دخول جديد إلى Top 20 🚨"
             new_entries.append((rank, row, status_text, alert_count, price, change, volume))
-            
+
             state[key] = {
-                "change": change, 
-                "price": price, 
-                "rank": rank, 
-                "alert_count": alert_count
+                "change": change,
+                "price": price,
+                "rank": rank,
+                "alert_count": alert_count,
             }
         else:
             old_change = last_data["change"]
@@ -252,10 +261,10 @@ def main():
                 spike_entries.append((rank, row, status_text, alert_count, price, change, volume))
 
                 state[key] = {
-                    "change": change, 
-                    "price": price, 
-                    "rank": rank, 
-                    "alert_count": alert_count
+                    "change": change,
+                    "price": price,
+                    "rank": rank,
+                    "alert_count": alert_count,
                 }
 
     alerts = new_entries + spike_entries
@@ -263,15 +272,36 @@ def main():
     if alerts:
         lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, alert_count, price, chg, vol in alerts:
-            raw_ticker = str(row['name']).strip().upper()
+            raw_ticker = str(row["name"]).strip().upper()
             ticker_escaped = html.escape(raw_ticker)
-            
+
             # الرابط الرسمي لصفحة الاقتباس/الشارت في Webull (يفتح الشارت + يفتح التطبيق على الجوال إن وُجد)
             webull_url = f"https://www.webull.com/quote/nasdaq-{raw_ticker}"
-            
-            high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
-            low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
-            ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] and not (row['EMA21'] != row['EMA21']) else price * 0.99
-            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] and not (row['EMA50'] != row['EMA50']) else price * 0.97
-            raw_vwap = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] and not (row['VWAP'] != row['VWAP']) else price
-            high_52 = float(row['price_52_week
+
+            high = float(row["high"]) if "high" in row and row["high"] and not (row["high"] != row["high"]) else price * 1.02
+            low = float(row["low"]) if "low" in row and row["low"] and not (row["low"] != row["low"]) else price * 0.98
+            ema21 = float(row["EMA21"]) if "EMA21" in row and row["EMA21"] and not (row["EMA21"] != row["EMA21"]) else price * 0.99
+            ema50 = float(row["EMA50"]) if "EMA50" in row and row["EMA50"] and not (row["EMA50"] != row["EMA50"]) else price * 0.97
+            raw_vwap = float(row["VWAP"]) if "VWAP" in row and row["VWAP"] and not (row["VWAP"] != row["VWAP"]) else price
+            high_52 = float(row["price_52_week_high"]) if "price_52_week_high" in row and row["price_52_week_high"] and not (row["price_52_week_high"] != row["price_52_week_high"]) else 0.0
+
+            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
+
+            lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
+            lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
+            lines.append(f"📈 الشارت: <a href=\"{webull_url}\">Webull App</a>")
+            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} ➔ ${lvl['t2']:.2f} ➔ ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
+            lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
+            lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
+            lines.append("-----------------------------------\n")
+
+        send("\n".join(lines))
+        print(f"[{session}] Sent {len(alerts)} alerts.")
+    else:
+        print(f"[{session}] Top 20 checked, no new entries or sudden spikes.")
+
+    save_state(today, state)
+
+
+if __name__ == "__main__":
+    main()
