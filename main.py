@@ -27,7 +27,7 @@ MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
-SLEEP_INTERVAL = 60            # زمن الانتظار بين كل فحص وفحص (60 ثانية = دقيقة واحدة)
+SLEEP_INTERVAL = 120           # زمن الانتظار بين كل فحص وفحص (120 ثانية = دقيقتين)
 
 # البورصات الرسمية المسموح بها فقط (استبعاد OTC)
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -63,8 +63,6 @@ def current_session():
 
 
 def get_top_gainers_query(session):
-    """جلب ماسح Top Gainers المباشر لـ TradingView مع القطاع و VWAP لـ 100 سهم واستبعاد أسهم OTC."""
-    # شرط استبعاد OTC بالاعتماد على البورصات الرسمية الرئيسية فقط
     exchange_filter = col("exchange").isin(VALID_EXCHANGES)
 
     if session == "pre":
@@ -133,7 +131,6 @@ def save_state(today, state):
 
 
 def send_single_message(text):
-    """إرسال رسالة منفردة آمنة إلى تليجرام."""
     if not text.strip():
         return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -153,7 +150,6 @@ def send_single_message(text):
 
 
 def send_alerts_in_batches(header, alert_blocks):
-    """تجميع التنبيهات بأسهم كاملة بدون كسر وسوم HTML."""
     current_message = header + "\n\n"
     
     for block in alert_blocks:
@@ -290,14 +286,14 @@ def check_and_alert():
 
 
 def main():
-    print("Bot started with 1-minute continuous loop (No OTC)...")
+    print("Bot started with 2-minute continuous loop...")
     while True:
         try:
             check_and_alert()
         except Exception as e:
             print(f"Error during check: {e}")
         
-        # الانتظار لمدة دقيقة واحدة قبل الفحص التالي
+        # الانتظار دقيقتين (120 ثانية)
         time.sleep(SLEEP_INTERVAL)
 
 
