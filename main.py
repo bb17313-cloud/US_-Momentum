@@ -1,9 +1,10 @@
 """US Top Gainers & Sudden Momentum Tracker.
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
-Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
+Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
 Includes Sector, Hyperlinked TradingView text, Repeat count, and Real VWAP.
 """
+import html
 import json
 import os
 import sys
@@ -22,7 +23,7 @@ SEEN_FILE = "seen.json"
 # إعدادات الفلترة والشروط
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
-TOP_LIMIT = 20                 # متابعة أفضل 20 سهم في نادي Top Gainers
+SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
 
 SESSION_AR = {
@@ -56,7 +57,7 @@ def current_session():
 
 
 def get_top_gainers_query(session):
-    """جلب ماسح Top Gainers المباشر لـ TradingView مع القطاع و VWAP."""
+    """جلب ماسح Top Gainers المباشر لـ TradingView مع القطاع و VWAP لـ 100 سهم."""
     if session == "pre":
         filters = [
             col("premarket_close") > MIN_PRICE, 
@@ -77,7 +78,7 @@ def get_top_gainers_query(session):
         filters = [
             col("close") > MIN_PRICE, 
             col("change") > 0.0,
-            col("volume") >= 1000  # تقليل شرط الحجم قليلاً في أول دقائق الافتتاح
+            col("volume") >= 1000
         ]
         sort_col = "change"
         extra = ["close", "change", "volume"]
@@ -91,7 +92,7 @@ def get_top_gainers_query(session):
         .select(*columns)
         .where(col("type") == "stock", *filters)
         .order_by(sort_col, ascending=False)
-        .limit(100)
+        .limit(SCAN_LIMIT)
     )
     return query, sort_col, extra
 
@@ -99,10 +100,7 @@ def get_top_gainers_query(session):
 def run_screen(session):
     query, sort_col, extra = get_top_gainers_query(session)
     _, df = query.get_scanner_data()
-    if df is None or df.empty:
-        return df
-        
-    return df.head(TOP_LIMIT)
+    return df
 
 
 def load_state():
@@ -123,18 +121,29 @@ def save_state(today, state):
 
 
 def send(text):
-    """إرسال الرسالة مع تفعيل HTML لتنسيق الألوان والروابط."""
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
-        timeout=20,
-    )
-    r.raise_for_status()
+    """إرسال الرسالة مع حماية التنسيق وتقسيم الرسائل الكبيرة."""
+    if not text.strip():
+        return
+        
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    
+    max_length = 3800
+    chunks = [text[i:i + max_length] for i in range(0, len(text), max_length)]
+    
+    for chunk in chunks:
+        r = requests.post(
+            url,
+            data={
+                "chat_id": CHAT_ID,
+                "text": chunk,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=20,
+        )
+        if not r.ok:
+            print(f"Telegram API Error: {r.status_code} - {r.text}")
+        r.raise_for_status()
 
 
 def calculate_levels(price, high, low, ema21, ema50):
@@ -185,7 +194,7 @@ def main():
         print(f"[{session}] No Top Gainers found.")
         return
 
-    print(f"[{session}] Fetched {len(df)} rows successfully.")
+    print(f"[{session}] Fetched {len(df)} rows from Top {SCAN_LIMIT} successfully.")
 
     new_entries = []
     spike_entries = []
@@ -200,7 +209,7 @@ def main():
 
         if not last_data:
             count = 1
-            new_entries.append((rank, row, "دخول جديد إلى Top 20 🚨", count))
+            new_entries.append((rank, row, "دخول جديد إلى القائمة 🚨", count))
         else:
             old_change = last_data["change"]
             count = last_data.get("count", 1)
@@ -216,7 +225,7 @@ def main():
     if alerts:
         lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, count in alerts:
-            ticker = str(row['name']).strip()
+            ticker = html.escape(str(row['name']).strip())
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
             price = safe_float(row[price_c])
@@ -226,9 +235,11 @@ def main():
             ema21 = safe_float(row.get('EMA21'), price * 0.99)
             ema50 = safe_float(row.get('EMA50'), price * 0.97)
             
-            sector = str(row.get('sector', 'غير محدد'))
-            if sector == 'nan' or not sector:
+            sector_raw = str(row.get('sector', 'غير محدد'))
+            if sector_raw.lower() == 'nan' or not sector_raw:
                 sector = "غير محدد"
+            else:
+                sector = html.escape(sector_raw)
                 
             vwap_val = safe_float(row.get('VWAP'), price)
             vol_val = safe_float(row.get(vol_c))
@@ -248,7 +259,7 @@ def main():
         send("\n".join(lines))
         print(f"[{session}] Sent {len(alerts)} alerts.")
     else:
-        print(f"[{session}] Top 20 checked, no new entries or sudden spikes.")
+        print(f"[{session}] Checked Top {SCAN_LIMIT}, no new entries or sudden spikes.")
 
     save_state(today, state)
 
