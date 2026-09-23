@@ -3,7 +3,7 @@
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
 Includes Sector, Hyperlinked TradingView text, Repeat count, and Real VWAP.
-Excludes OTC / Pink Sheets stocks completely.
+Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (35k).
 """
 import html
 import json
@@ -22,14 +22,14 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# إعدادات الفلترة والشروط
+# إعدادات الفلترة والشروط الصارمة
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
-MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
+MIN_VOL = 35_000                # السيولة والحجم الأدنى الصارم (35 ألف وأعلى لجميع الجلسات)
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
 SLEEP_INTERVAL = 120           # زمن الانتظار بين كل فحص وفحص (120 ثانية = دقيقتين)
 
-# البورصات الرسمية المسموح بها فقط (استبعاد OTC)
+# البورصات الرسمية المسموح بها فقط (استبعاد تام لأسهم OTC / OCPK)
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
 SESSION_AR = {
@@ -87,7 +87,7 @@ def get_top_gainers_query(session):
         filters = [
             col("close") > MIN_PRICE, 
             col("change") > 0.0,
-            col("volume") >= 1000,
+            col("volume") >= MIN_VOL,  # تم الرفع إلى 35 ألف لضمان السيولة الصارمة
             exchange_filter
         ]
         sort_col = "change"
@@ -211,7 +211,7 @@ def check_and_alert():
         print(f"[{session}] No Top Gainers found.")
         return
 
-    print(f"[{datetime.now(NY).strftime('%H:%M:%S')}] [{session}] Fetched {len(df)} non-OTC rows.")
+    print(f"[{datetime.now(NY).strftime('%H:%M:%S')}] [{session}] Fetched {len(df)} non-OTC high-volume rows.")
 
     new_entries = []
     spike_entries = []
