@@ -5,7 +5,7 @@ Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
 Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
 Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
-Fixed Telegram App Links via Universal Webull Redirect & KeyError postmarket_close protection.
+Fixed Webull direct app deep links via Webull Official Ticker Redirect.
 """
 import html
 import json
@@ -66,7 +66,7 @@ def get_top_gainers_query(session):
     elif session == "after":
         filters = [col("postmarket_close") >= MIN_PRICE]
         sort_col = "postmarket_change"
-        extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
+        extra = ["postmarket_change", "postmarket_volume"]
     else: # market
         filters = [col("close") >= MIN_PRICE, col("change") > 2.0]
         sort_col = "change"
@@ -272,11 +272,11 @@ def main():
     if alerts:
         lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
         for rank, row, status_title, alert_count, price, chg, vol in alerts:
-            raw_ticker = str(row['name']).strip()
+            raw_ticker = str(row['name']).strip().upper()
             ticker_escaped = html.escape(raw_ticker)
             
-            # رابط Webull العالمي المعتمد المقبول في تيليجرام ويفتح التطبيق مباشرة
-            webull_url = f"https://www.webullfintech.com/quote/us/stock/{raw_ticker.lower()}"
+            # الرابط الرسمي لنظام توجيه تطبيق Webull المباشر على الآيفون (a.webull.com)
+            webull_url = f"https://a.webull.com/i/{raw_ticker}"
             
             high = float(row['high']) if 'high' in row and row['high'] and not (row['high'] != row['high']) else price * 1.02
             low = float(row['low']) if 'low' in row and row['low'] and not (row['low'] != row['low']) else price * 0.98
