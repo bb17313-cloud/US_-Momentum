@@ -19,7 +19,7 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# إعدادات الفلترة والشروط المحفوظة
+# إعدادات الفلترة والشروط (محفوظة دون تغيير)
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
 TOP_LIMIT = 20                 # متابعة أفضل 20 سهم في نادي Top Gainers
@@ -49,6 +49,8 @@ def current_session():
     if 4 * 60 <= minutes < 9 * 60 + 30:
         return "pre"
     if 9 * 60 + 30 <= minutes < 16 * 60:
+        return "market"
+    if 16 * 60 <= minutes < 20 * 60:
         return "after"
     return None
 
@@ -80,7 +82,6 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    # إضافة "sector" و "VWAP" للقوائم الفنية
     tech_cols = ["high", "low", "EMA21", "EMA50", "average_volume_10d_calc", "sector", "VWAP"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
@@ -187,19 +188,16 @@ def main():
         last_data = state.get(key)
 
         if not last_data:
-            # أول ظهور للسهم (تكرار 1)
             count = 1
             new_entries.append((rank, row, "دخول جديد إلى Top 20 🚨", count))
         else:
             old_change = last_data["change"]
             count = last_data.get("count", 1)
-            # تسارع في الزخم (قفزة بـ 2% أو أكثر)
             if change - old_change >= SPIKE_THRESHOLD:
                 count += 1
                 spike = change - old_change
                 spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", count))
 
-        # تحديث الحالة الحالية للسهم مع عداد التكرار
         state[key] = {"change": change, "price": price, "rank": rank, "count": count}
 
     alerts = new_entries + spike_entries
@@ -217,13 +215,11 @@ def main():
             ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
             ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
             
-            # جلب القطاع و VWAP الحقيقي
             sector = str(row['sector']) if 'sector' in row and row['sector'] else "غير محدد"
             vwap_val = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
 
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
-            # نص التكرار باللون الأحمر (استخدام HTML للتمييز)
             repeat_str = f"🔴 <b>[تكرار {count}]</b>"
 
             lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}")
