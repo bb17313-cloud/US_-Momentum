@@ -19,7 +19,7 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# إعدادات الفلترة والشروط (محفوظة دون تغيير)
+# إعدادات الفلترة والشروط
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
 TOP_LIMIT = 20                 # متابعة أفضل 20 سهم في نادي Top Gainers
@@ -60,7 +60,7 @@ def get_top_gainers_query(session):
     if session == "pre":
         filters = [
             col("premarket_close") > MIN_PRICE, 
-            col("premarket_change") > 2.0,
+            col("premarket_change") > 0.0,
             col("premarket_volume") >= MIN_VOL
         ]
         sort_col = "premarket_change"
@@ -68,7 +68,7 @@ def get_top_gainers_query(session):
     elif session == "after":
         filters = [
             col("postmarket_close") > MIN_PRICE, 
-            col("postmarket_change") > 2.0,
+            col("postmarket_change") > 0.0,
             col("postmarket_volume") >= MIN_VOL
         ]
         sort_col = "postmarket_change"
@@ -76,8 +76,8 @@ def get_top_gainers_query(session):
     else: # market
         filters = [
             col("close") > MIN_PRICE, 
-            col("change") > 2.0,
-            col("volume") >= MIN_VOL
+            col("change") > 0.0,
+            col("volume") >= 1000  # تقليل شرط الحجم قليلاً في أول دقائق الافتتاح
         ]
         sort_col = "change"
         extra = ["close", "change", "volume"]
@@ -99,7 +99,7 @@ def get_top_gainers_query(session):
 def run_screen(session):
     query, sort_col, extra = get_top_gainers_query(session)
     _, df = query.get_scanner_data()
-    if df.empty:
+    if df is None or df.empty:
         return df
         
     return df.head(TOP_LIMIT)
@@ -157,6 +157,15 @@ def calculate_levels(price, high, low, ema21, ema50):
     }
 
 
+def safe_float(val, default=0.0):
+    try:
+        if val is None or str(val).lower() == 'nan':
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def main():
     session = current_session()
     if not session:
@@ -169,20 +178,22 @@ def main():
     try:
         df = run_screen(session)
     except Exception as e:
-        print(f"[{session}] error fetching data: {e}")
+        print(f"[{session}] Error fetching data: {e}")
         sys.exit(1)
 
-    if df.empty:
-        print("No Top Gainers found.")
+    if df is None or df.empty:
+        print(f"[{session}] No Top Gainers found.")
         return
+
+    print(f"[{session}] Fetched {len(df)} rows successfully.")
 
     new_entries = []
     spike_entries = []
 
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
         ticker = str(row['name']).strip()
-        change = float(row[chg_c]) if row[chg_c] else 0.0
-        price = float(row[price_c]) if row[price_c] else 0.0
+        change = safe_float(row[chg_c])
+        price = safe_float(row[price_c])
 
         key = f"{session}:{ticker}"
         last_data = state.get(key)
@@ -208,15 +219,19 @@ def main():
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
-            price = float(row[price_c]) if row[price_c] else 0.0
-            chg = float(row[chg_c]) if row[chg_c] else 0.0
-            high = float(row['high']) if 'high' in row and row['high'] else price * 1.02
-            low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
-            ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
-            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
+            price = safe_float(row[price_c])
+            chg = safe_float(row[chg_c])
+            high = safe_float(row.get('high'), price * 1.02)
+            low = safe_float(row.get('low'), price * 0.98)
+            ema21 = safe_float(row.get('EMA21'), price * 0.99)
+            ema50 = safe_float(row.get('EMA50'), price * 0.97)
             
-            sector = str(row['sector']) if 'sector' in row and row['sector'] else "غير محدد"
-            vwap_val = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
+            sector = str(row.get('sector', 'غير محدد'))
+            if sector == 'nan' or not sector:
+                sector = "غير محدد"
+                
+            vwap_val = safe_float(row.get('VWAP'), price)
+            vol_val = safe_float(row.get(vol_c))
 
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
@@ -224,7 +239,7 @@ def main():
 
             lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}")
             lines.append(f"🏢 القطاع: <b>{sector}</b>")
-            lines.append(f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {row[vol_c]:,.0f}")
+            lines.append(f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}")
             lines.append(f"📈 الشارت: <a href='{tv_url}'>TradingView</a>")
             lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
             lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>")
