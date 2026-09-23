@@ -2,7 +2,7 @@
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
-Runs on GitHub Actions every 10 minutes.
+Includes Sector, Hyperlinked TradingView text, Repeat count, and Real VWAP.
 """
 import json
 import os
@@ -19,7 +19,7 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# إعدادات الفلترة والشروط المعدلة
+# إعدادات الفلترة والشروط المحفوظة
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
 TOP_LIMIT = 20                 # متابعة أفضل 20 سهم في نادي Top Gainers
@@ -49,14 +49,12 @@ def current_session():
     if 4 * 60 <= minutes < 9 * 60 + 30:
         return "pre"
     if 9 * 60 + 30 <= minutes < 16 * 60:
-        return "market"
-    if 16 * 60 <= minutes < 20 * 60:
         return "after"
     return None
 
 
 def get_top_gainers_query(session):
-    """جلب ماسح Top Gainers المباشر لـ TradingView حسب الجلسة."""
+    """جلب ماسح Top Gainers المباشر لـ TradingView مع القطاع و VWAP."""
     if session == "pre":
         filters = [
             col("premarket_close") > MIN_PRICE, 
@@ -82,7 +80,8 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["high", "low", "EMA21", "EMA50", "average_volume_10d_calc"]
+    # إضافة "sector" و "VWAP" للقوائم الفنية
+    tech_cols = ["high", "low", "EMA21", "EMA50", "average_volume_10d_calc", "sector", "VWAP"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -123,11 +122,13 @@ def save_state(today, state):
 
 
 def send(text):
+    """إرسال الرسالة مع تفعيل HTML لتنسيق الألوان والروابط."""
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": text,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         },
         timeout=20,
@@ -181,29 +182,31 @@ def main():
         ticker = str(row['name']).strip()
         change = float(row[chg_c]) if row[chg_c] else 0.0
         price = float(row[price_c]) if row[price_c] else 0.0
-        vol = float(row[vol_c]) if row[vol_c] else 0.0
 
         key = f"{session}:{ticker}"
         last_data = state.get(key)
 
         if not last_data:
-            # دخول جديد لقائمة Top 20
-            new_entries.append((rank, row, "دخول جديد إلى Top 20 🚨", 0.0))
+            # أول ظهور للسهم (تكرار 1)
+            count = 1
+            new_entries.append((rank, row, "دخول جديد إلى Top 20 🚨", count))
         else:
             old_change = last_data["change"]
-            # تسارع في الزخم (قفزة إضافية بـ 2% أو أكثر عن آخر قراءة)
+            count = last_data.get("count", 1)
+            # تسارع في الزخم (قفزة بـ 2% أو أكثر)
             if change - old_change >= SPIKE_THRESHOLD:
+                count += 1
                 spike = change - old_change
-                spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", old_change))
+                spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", count))
 
-        # تحديث الحالة الحالية للسهم
-        state[key] = {"change": change, "price": price, "rank": rank}
+        # تحديث الحالة الحالية للسهم مع عداد التكرار
+        state[key] = {"change": change, "price": price, "rank": rank, "count": count}
 
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 **تحديث الزخم وTop Gainers** | {SESSION_AR[session]}\n"]
-        for rank, row, status_title, old_chg in alerts:
+        lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
+        for rank, row, status_title, count in alerts:
             ticker = str(row['name']).strip()
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
             
@@ -213,14 +216,22 @@ def main():
             low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
             ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
             ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
+            
+            # جلب القطاع و VWAP الحقيقي
+            sector = str(row['sector']) if 'sector' in row and row['sector'] else "غير محدد"
+            vwap_val = float(row['VWAP']) if 'VWAP' in row and row['VWAP'] else price
 
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
-            lines.append(f"🔥 #{rank} **{ticker}** — {status_title}")
-            lines.append(f"💵 السعر: **{price:.2f}$** | التغير: **{chg:+.1f}%** | Vol: {row[vol_c]:,.0f}")
-            lines.append(f"📈 الشارت: {tv_url}")
-            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
-            lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$")
+            # نص التكرار باللون الأحمر (استخدام HTML للتمييز)
+            repeat_str = f"🔴 <b>[تكرار {count}]</b>"
+
+            lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}")
+            lines.append(f"🏢 القطاع: <b>{sector}</b>")
+            lines.append(f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {row[vol_c]:,.0f}")
+            lines.append(f"📈 الشارت: <a href='{tv_url}'>TradingView</a>")
+            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
+            lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>")
             lines.append("-----------------------------------\n")
 
         send("\n".join(lines))
