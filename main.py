@@ -1,13 +1,9 @@
 """US Top Gainers & Sudden Momentum Tracker.
 
-Monitors official Top Gainers for Pre-market, Market, and After-hours.
+Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers entering Top 20 or SUDDEN spikes in percentage gain.
-Fixed Intraday VWAP calculation & distinct Stop-Loss levels.
-Includes REAL 52-Week High targets.
 Runs on GitHub Actions every 10 minutes.
-Fixed Webull direct app deep links via Webull Official Ticker Redirect.
 """
-import html
 import json
 import os
 import sys
@@ -23,14 +19,15 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-MIN_PRICE = 0.65                # أدنى سعر للسهم
-MIN_TODAY_LIQUIDITY = 50_000   # سيولة اليوم (السعر × حجم الجلسة) بالدولار
-TOP_LIMIT = 20                 # متابعة أفضل 20 سهم
-SPIKE_THRESHOLD = 3.0          # قفزة إضافية بـ 3% أو أكثر للسهم نفسه
+# إعدادات الفلترة والشروط المعدلة
+MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
+MIN_VOL = 30_000                # السيولة والحجم من 30 ألف وأعلى لجميع الجلسات
+TOP_LIMIT = 20                 # متابعة أفضل 20 سهم في نادي Top Gainers
+SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
 
 SESSION_AR = {
-    "pre": "قبل الافتتاح (Pre-Market)",
-    "market": "الجلسة النظامية (Market)",
+    "pre": "قبل الافتتاح (Pre-Market)", 
+    "market": "الجلسة النظامية (Market)", 
     "after": "بعد الإغلاق (After-Hours)"
 }
 
@@ -53,26 +50,39 @@ def current_session():
         return "pre"
     if 9 * 60 + 30 <= minutes < 16 * 60:
         return "market"
-    if 16 * 60 + 30 <= minutes < 20 * 60:
+    if 16 * 60 <= minutes < 20 * 60:
         return "after"
     return None
 
 
 def get_top_gainers_query(session):
+    """جلب ماسح Top Gainers المباشر لـ TradingView حسب الجلسة."""
     if session == "pre":
-        filters = [col("premarket_close") >= MIN_PRICE]
+        filters = [
+            col("premarket_close") > MIN_PRICE, 
+            col("premarket_change") > 2.0,
+            col("premarket_volume") >= MIN_VOL
+        ]
         sort_col = "premarket_change"
         extra = ["premarket_close", "premarket_change", "premarket_volume"]
     elif session == "after":
-        filters = [col("postmarket_close") >= MIN_PRICE]
+        filters = [
+            col("postmarket_close") > MIN_PRICE, 
+            col("postmarket_change") > 2.0,
+            col("postmarket_volume") >= MIN_VOL
+        ]
         sort_col = "postmarket_change"
-        extra = ["postmarket_change", "postmarket_volume"]
-    else:  # market
-        filters = [col("close") >= MIN_PRICE, col("change") > 2.0]
+        extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
+    else: # market
+        filters = [
+            col("close") > MIN_PRICE, 
+            col("change") > 2.0,
+            col("volume") >= MIN_VOL
+        ]
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["close", "high", "low", "EMA21", "EMA50", "VWAP", "price_52_week_high"]
+    tech_cols = ["high", "low", "EMA21", "EMA50", "average_volume_10d_calc"]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -89,24 +99,9 @@ def get_top_gainers_query(session):
 def run_screen(session):
     query, sort_col, extra = get_top_gainers_query(session)
     _, df = query.get_scanner_data()
-    if df is None or df.empty:
+    if df.empty:
         return df
-
-    price_col, chg_col, vol_col = DISPLAY[session]
-
-    # حماية من عدم وجود أعمدة معينة في البيانات المرجعة من الفرز
-    if price_col not in df.columns:
-        df[price_col] = df["close"] if "close" in df.columns else 0.0
-    if chg_col not in df.columns:
-        df[chg_col] = df["change"] if "change" in df.columns else 0.0
-    if vol_col not in df.columns:
-        df[vol_col] = df["volume"] if "volume" in df.columns else 0.0
-
-    # سيولة اليوم للجلسة الحالية: السعر × حجم الجلسة >= 50,000 دولار
-    p_series = df[price_col].fillna(0)
-    v_series = df[vol_col].fillna(0)
-    df = df[(p_series * v_series) >= MIN_TODAY_LIQUIDITY]
-
+        
     return df.head(TOP_LIMIT)
 
 
@@ -127,81 +122,36 @@ def save_state(today, state):
         json.dump({"date": today, "state": state}, f)
 
 
-def send_message_chunk(text):
-    """إرسال قطعة نصية واحدة لتيليجرام مع التعامل الذكي مع أخطاء التنسيق."""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    r = requests.post(url, data=payload, timeout=20)
-
-    if r.status_code == 400:
-        payload.pop("parse_mode")
-        r = requests.post(url, data=payload, timeout=20)
-
+def send(text):
+    r = requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "disable_web_page_preview": True,
+        },
+        timeout=20,
+    )
     r.raise_for_status()
 
 
-def send(text):
-    """تقسيم النص إذا تجاوز 3500 حرف لضمان عدم تجاوز الحد الأقصى لـ Telegram (4096 حرف)."""
-    if len(text) <= 3500:
-        send_message_chunk(text)
-        return
-
-    lines = text.split("\n")
-    chunk = ""
-    for line in lines:
-        if len(chunk) + len(line) + 1 > 3500:
-            send_message_chunk(chunk)
-            chunk = line + "\n"
-        else:
-            chunk += line + "\n"
-    if chunk.strip():
-        send_message_chunk(chunk)
-
-
-def calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session):
-    """حساب الأهداف والدعوم اللحظية و VWAP الدقيق والوقف."""
+def calculate_levels(price, high, low, ema21, ema50):
     pivot = (high + low + price) / 3
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
 
-    if high_52 > 0:
-        if price < high_52:
-            t_max = high_52
-        else:
-            t_max = max(r3 * 1.08, price * 1.05)
-    else:
-        t_max = r3 * 1.08
-
-    # حساب الـ VWAP الدقيق بحسب الجلسة والسعر اللحظي الفعلي
-    if session in ["pre", "after"] or raw_vwap <= 0 or abs(raw_vwap - price) / price > 0.15:
-        vwap_support = (high + low + (price * 2)) / 4
-    else:
-        vwap_support = raw_vwap
-
-    dynamic_support = max(low, price * 0.94)
-    if 0 < ema21 < price and ema21 > dynamic_support:
-        support_intraday = ema21
-    else:
-        support_intraday = dynamic_support
-
-    base_support = min(support_intraday, vwap_support)
-    stop_loss = base_support * 0.985
+    support_intraday = min(low, ema21 if 0 < ema21 < price else low)
+    support_ilz = min(ema50 if 0 < ema50 < price else support_intraday * 0.98, pivot)
 
     return {
         "support_intraday": support_intraday,
-        "vwap_support": vwap_support,
+        "support_ilz": support_ilz,
         "t1": r1,
         "t2": r2,
         "t3": r3,
-        "t_max": t_max,
-        "high_52": high_52,
-        "stop_loss": stop_loss,
+        "t_max": r3 * 1.08,
+        "stop_1": support_intraday * 0.985,
     }
 
 
@@ -220,82 +170,57 @@ def main():
         print(f"[{session}] error fetching data: {e}")
         sys.exit(1)
 
-    if df is None or df.empty:
-        print(f"[{session}] No Top Gainers found.")
+    if df.empty:
+        print("No Top Gainers found.")
         return
 
     new_entries = []
     spike_entries = []
 
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
-        ticker = str(row["name"]).strip()
-
-        price = float(row[price_c]) if price_c in row and row[price_c] and not (row[price_c] != row[price_c]) else float(row.get("close", 0.0))
-        change = float(row[chg_c]) if chg_c in row and row[chg_c] and not (row[chg_c] != row[chg_c]) else 0.0
-        volume = float(row[vol_c]) if vol_c in row and row[vol_c] and not (row[vol_c] != row[vol_c]) else 0.0
-
-        if price <= 0:
-            continue
+        ticker = str(row['name']).strip()
+        change = float(row[chg_c]) if row[chg_c] else 0.0
+        price = float(row[price_c]) if row[price_c] else 0.0
+        vol = float(row[vol_c]) if row[vol_c] else 0.0
 
         key = f"{session}:{ticker}"
         last_data = state.get(key)
 
         if not last_data:
-            alert_count = 1
-            status_text = "دخول جديد إلى Top 20 🚨"
-            new_entries.append((rank, row, status_text, alert_count, price, change, volume))
-
-            state[key] = {
-                "change": change,
-                "price": price,
-                "rank": rank,
-                "alert_count": alert_count,
-            }
+            # دخول جديد لقائمة Top 20
+            new_entries.append((rank, row, "دخول جديد إلى Top 20 🚨", 0.0))
         else:
             old_change = last_data["change"]
-            alert_count = last_data.get("alert_count", 1)
-
+            # تسارع في الزخم (قفزة إضافية بـ 2% أو أكثر عن آخر قراءة)
             if change - old_change >= SPIKE_THRESHOLD:
-                alert_count += 1
                 spike = change - old_change
-                status_text = f"تسارع زخم مفاجئ (+{spike:.1f}% 📈) [تكرار #{alert_count}]"
-                spike_entries.append((rank, row, status_text, alert_count, price, change, volume))
+                spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", old_change))
 
-                state[key] = {
-                    "change": change,
-                    "price": price,
-                    "rank": rank,
-                    "alert_count": alert_count,
-                }
+        # تحديث الحالة الحالية للسهم
+        state[key] = {"change": change, "price": price, "rank": rank}
 
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
-        for rank, row, status_title, alert_count, price, chg, vol in alerts:
-            raw_ticker = str(row["name"]).strip().upper()
-            ticker_escaped = html.escape(raw_ticker)
+        lines = [f"🚨 **تحديث الزخم وTop Gainers** | {SESSION_AR[session]}\n"]
+        for rank, row, status_title, old_chg in alerts:
+            ticker = str(row['name']).strip()
+            tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+            
+            price = float(row[price_c]) if row[price_c] else 0.0
+            chg = float(row[chg_c]) if row[chg_c] else 0.0
+            high = float(row['high']) if 'high' in row and row['high'] else price * 1.02
+            low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
+            ema21 = float(row['EMA21']) if 'EMA21' in row and row['EMA21'] else price * 0.99
+            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
 
-            # الرابط الرسمي لصفحة الاقتباس/الشارت في Webull
-            webull_url = f"https://www.webull.com/quote/nasdaq-{raw_ticker}"
-            # رابط TradingView للشارت مع التحكم الكامل بالفواصل (1m / 5m / 15m ...)
-            tv_url = f"https://www.tradingview.com/chart/?symbol={raw_ticker}"
+            lvl = calculate_levels(price, high, low, ema21, ema50)
 
-            high = float(row["high"]) if "high" in row and row["high"] and not (row["high"] != row["high"]) else price * 1.02
-            low = float(row["low"]) if "low" in row and row["low"] and not (row["low"] != row["low"]) else price * 0.98
-            ema21 = float(row["EMA21"]) if "EMA21" in row and row["EMA21"] and not (row["EMA21"] != row["EMA21"]) else price * 0.99
-            ema50 = float(row["EMA50"]) if "EMA50" in row and row["EMA50"] and not (row["EMA50"] != row["EMA50"]) else price * 0.97
-            raw_vwap = float(row["VWAP"]) if "VWAP" in row and row["VWAP"] and not (row["VWAP"] != row["VWAP"]) else price
-            high_52 = float(row["price_52_week_high"]) if "price_52_week_high" in row and row["price_52_week_high"] and not (row["price_52_week_high"] != row["price_52_week_high"]) else 0.0
-
-            lvl = calculate_levels(price, high, low, ema21, ema50, raw_vwap, high_52, session)
-
-            lines.append(f"🔥 #{rank} <b>{ticker_escaped}</b> — {status_title}")
-            lines.append(f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>+{chg:.1f}%</b> | Vol: {vol:,.0f}")
-            lines.append(f"📈 الشارت: <a href=\"{webull_url}\">Webull</a> | <a href=\"{tv_url}\">TradingView</a>")
-            lines.append(f"🎯 الأهداف: ${lvl['t1']:.2f} ➔ ${lvl['t2']:.2f} ➔ ${lvl['t3']:.2f} (قمة 52 أسبوع: <b>${lvl['t_max']:.2f}</b>)")
-            lines.append(f"🛡 الدعم: ${lvl['support_intraday']:.2f} | VWAP: <b>${lvl['vwap_support']:.2f}</b>")
-            lines.append(f"⛔️ الوقف: <b>${lvl['stop_loss']:.2f}</b>")
+            lines.append(f"🔥 #{rank} **{ticker}** — {status_title}")
+            lines.append(f"💵 السعر: **{price:.2f}$** | التغير: **{chg:+.1f}%** | Vol: {row[vol_c]:,.0f}")
+            lines.append(f"📈 الشارت: {tv_url}")
+            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -> {lvl['t2']:.2f}$ -> {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
+            lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$")
             lines.append("-----------------------------------\n")
 
         send("\n".join(lines))
