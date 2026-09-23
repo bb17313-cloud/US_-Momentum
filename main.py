@@ -120,30 +120,40 @@ def save_state(today, state):
         json.dump({"date": today, "state": state}, f)
 
 
-def send(text):
-    """إرسال الرسالة مع حماية التنسيق وتقسيم الرسائل الكبيرة."""
+def send_single_message(text):
+    """إرسال رسالة منفردة آمنة إلى تليجرام."""
     if not text.strip():
         return
-        
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    r = requests.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=20,
+    )
+    if not r.ok:
+        print(f"Telegram API Error: {r.status_code} - {r.text}")
+    r.raise_for_status()
+
+
+def send_alerts_in_batches(header, alert_blocks):
+    """تجميع التنبيهات بأسهم كاملة بدون كسر وسوم HTML."""
+    current_message = header + "\n\n"
     
-    max_length = 3800
-    chunks = [text[i:i + max_length] for i in range(0, len(text), max_length)]
-    
-    for chunk in chunks:
-        r = requests.post(
-            url,
-            data={
-                "chat_id": CHAT_ID,
-                "text": chunk,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=20,
-        )
-        if not r.ok:
-            print(f"Telegram API Error: {r.status_code} - {r.text}")
-        r.raise_for_status()
+    for block in alert_blocks:
+        # إذا تجاوزت الرسالة مع السهم الجديد الحد الآمن (3000 حرف)، أرسل الحالية وابدأ واحدة جديدة
+        if len(current_message) + len(block) > 3000:
+            send_single_message(current_message)
+            current_message = header + " (تابع)\n\n" + block + "\n-----------------------------------\n"
+        else:
+            current_message += block + "\n-----------------------------------\n"
+            
+    if current_message.strip():
+        send_single_message(current_message)
 
 
 def calculate_levels(price, high, low, ema21, ema50):
@@ -223,7 +233,9 @@ def main():
     alerts = new_entries + spike_entries
 
     if alerts:
-        lines = [f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}\n"]
+        header = f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}"
+        alert_blocks = []
+
         for rank, row, status_title, count in alerts:
             ticker = html.escape(str(row['name']).strip())
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
@@ -248,16 +260,18 @@ def main():
 
             repeat_str = f"🔴 <b>[تكرار {count}]</b>"
 
-            lines.append(f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}")
-            lines.append(f"🏢 القطاع: <b>{sector}</b>")
-            lines.append(f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}")
-            lines.append(f"📈 الشارت: <a href='{tv_url}'>TradingView</a>")
-            lines.append(f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)")
-            lines.append(f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>")
-            lines.append("-----------------------------------\n")
+            block_lines = [
+                f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}",
+                f"🏢 القطاع: <b>{sector}</b>",
+                f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
+                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
+                f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)",
+                f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>"
+            ]
+            alert_blocks.append("\n".join(block_lines))
 
-        send("\n".join(lines))
-        print(f"[{session}] Sent {len(alerts)} alerts.")
+        send_alerts_in_batches(header, alert_blocks)
+        print(f"[{session}] Sent {len(alerts)} alerts safely.")
     else:
         print(f"[{session}] Checked Top {SCAN_LIMIT}, no new entries or sudden spikes.")
 
