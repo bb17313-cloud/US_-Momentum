@@ -1,9 +1,9 @@
-name: US Momentum Tracker
+Name: US Momentum Tracker
 
 on:
   schedule:
-    # تشغيل تلقائي كل 5 دقائق
-    - cron: '*/5 * * * *'
+    # تشغيل تلقائي كل 15 دقيقة
+    - cron: '*/15 * * * *'
   workflow_dispatch: # يتيح لك التشغيل اليدوي أيضاً
 
 # هذه الخاصية تقوم بإلغاء التشغيل القديم فور رفع تحديث جديد
