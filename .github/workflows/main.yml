@@ -1,12 +1,11 @@
-Name: US Momentum Tracker
+name: US Momentum Tracker
 
 on:
   schedule:
     # تشغيل تلقائي كل 15 دقيقة
     - cron: '*/15 * * * *'
-  workflow_dispatch: # يتيح لك التشغيل اليدوي أيضاً
+  workflow_dispatch:
 
-# هذه الخاصية تقوم بإلغاء التشغيل القديم فور رفع تحديث جديد
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
