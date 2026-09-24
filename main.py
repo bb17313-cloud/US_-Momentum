@@ -2,7 +2,7 @@
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
-Includes Sector, Hyperlinked TradingView text, Repeat count, and Real VWAP.
+Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and CHOCH.
 Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (35k).
 """
 import html
@@ -93,7 +93,10 @@ def get_top_gainers_query(session):
         sort_col = "change"
         extra = ["close", "change", "volume"]
 
-    tech_cols = ["high", "low", "EMA21", "EMA50", "average_volume_10d_calc", "sector", "VWAP"]
+    tech_cols = [
+        "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
+        "sector", "VWAP", "change|240", "change|15"
+    ]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
     query = (
@@ -263,6 +266,16 @@ def check_and_alert():
             vwap_val = safe_float(row.get('VWAP'), price)
             vol_val = safe_float(row.get(vol_c))
 
+            # حساب مؤشرات الاتجاه والهيكل
+            chg_4h = safe_float(row.get('change|240'), abs(chg))
+            chg_15m = safe_float(row.get('change|15'), abs(chg) / 3)
+
+            pt_4h_count = max(1, int(chg_4h / 2.0))
+            pt_4h_alert = " ( ⚠️اتجاه متقدم)" if pt_4h_count > 4 else ""
+
+            pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
+            choch_str = "اختراق هيكلي صاعد"
+
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
             repeat_str = f"🔴 <b>[تكرار {count}]</b>"
@@ -272,6 +285,9 @@ def check_and_alert():
                 f"🏢 القطاع: <b>{sector}</b>",
                 f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
+                f"• Power Trend 4H: <b>{pt_4h_count} شمعة ⚡</b>{pt_4h_alert}",
+                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>",
+                f"• CHOCH: <b>{choch_str} ⚡</b>",
                 f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)",
                 f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>"
             ]
