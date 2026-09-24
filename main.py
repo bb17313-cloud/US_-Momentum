@@ -2,7 +2,7 @@
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
-Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and CHOCH.
+Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and Conditional CHOCH.
 Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (35k).
 """
 import html
@@ -266,7 +266,7 @@ def check_and_alert():
             vwap_val = safe_float(row.get('VWAP'), price)
             vol_val = safe_float(row.get(vol_c))
 
-            # حساب مؤشرات الاتجاه والهيكل
+            # حساب مؤشرات الاتجاه
             chg_4h = safe_float(row.get('change|240'), abs(chg))
             chg_15m = safe_float(row.get('change|15'), abs(chg) / 3)
 
@@ -274,7 +274,10 @@ def check_and_alert():
             pt_4h_alert = " ( ⚠️اتجاه متقدم)" if pt_4h_count > 4 else ""
 
             pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
-            choch_str = "اختراق هيكلي صاعد"
+
+            # تحقق فعلي من وجود CHOCH (اختراق هيكلي صاعد)
+            # يتحقق عند اختراق القمة أو تداول السعر أعلى من VWAP و EMA21 و EMA50
+            is_choch = (price >= high and high > 0) or (price > vwap_val and price > ema50 and ema50 > 0 and price > ema21)
 
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
@@ -286,11 +289,18 @@ def check_and_alert():
                 f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
                 f"• Power Trend 4H: <b>{pt_4h_count} شمعة ⚡</b>{pt_4h_alert}",
-                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>",
-                f"• CHOCH: <b>{choch_str} ⚡</b>",
+                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>"
+            ]
+
+            # إظهار سطر CHOCH فقط إذا كان متحققاً فعلياً
+            if is_choch:
+                block_lines.append("• CHOCH: <b>اختراق هيكلي صاعد ⚡</b>")
+
+            block_lines.extend([
                 f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)",
                 f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>"
-            ]
+            ])
+
             alert_blocks.append("\n".join(block_lines))
 
         send_alerts_in_batches(header, alert_blocks)
