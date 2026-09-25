@@ -23,6 +23,10 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
+# ذاكرة عامة في الرام لضمان عدم استعادة الذاكرة الفارغة
+GLOBAL_STATE = {}
+GLOBAL_DATE = None
+
 # إعدادات الفلترة والشروط الصارمة
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 70_000                # السيولة والحجم الأدنى الصارم (70 ألف وأعلى لجميع الجلسات)
@@ -130,8 +134,11 @@ def load_state():
 
 
 def save_state(today, state):
-    with open(SEEN_FILE, "w") as f:
-        json.dump({"date": today, "state": state}, f)
+    try:
+        with open(SEEN_FILE, "w") as f:
+            json.dump({"date": today, "state": state}, f)
+    except Exception as e:
+        print(f"Error saving state: {e}")
 
 
 def send_single_message(text):
@@ -194,12 +201,25 @@ def safe_float(val, default=0.0):
 
 
 def check_and_alert():
+    global GLOBAL_STATE, GLOBAL_DATE
+
     session = current_session()
     if not session:
         print("Outside US sessions, skipping check.")
         return
 
-    today, state = load_state()
+    today = datetime.now(NY).strftime("%Y-%m-%d")
+
+    # تهيئة الذاكرة إذا أشرقت شمس يوم جديد
+    if GLOBAL_DATE != today:
+        GLOBAL_DATE = today
+        file_date, loaded_state = load_state()
+        if file_date == today:
+            GLOBAL_STATE = loaded_state
+        else:
+            GLOBAL_STATE = {}
+
+    state = GLOBAL_STATE
     price_c, chg_c, vol_c = DISPLAY[session]
 
     try:
@@ -222,48 +242,60 @@ def check_and_alert():
         change = safe_float(row[chg_c])
         price = safe_float(row[price_c])
 
-        key = ticker  # المفتاح هو الرمز مباشرة لتراكم التكرار طوال اليوم
-        last_data = state.get(key)
+        key = ticker
 
-        if not last_data:
+        if key not in state:
+            # تنبيه لأول مرة اليوم لهذا السهم
             count = 1
-            new_entries.append((rank, row, "جديد في القائمة 🚨", count))
             state[key] = {
-                "change": change,
-                "price": price,
-                "rank": rank,
                 "count": count,
                 "last_alert_change": change,
-                "min_change": change
+                "min_change": change,
+                "last_session": session,
+                "price": price,
+                "rank": rank
             }
+            new_entries.append((rank, row, "جديد في القائمة 🚨", count))
         else:
-            last_alert_change = last_data.get("last_alert_change", last_data.get("change", change))
-            min_change = last_data.get("min_change", last_alert_change)
-            count = last_data.get("count", 1)
+            item = state[key]
+            prev_count = item.get("count", 1)
+            last_alert_change = item.get("last_alert_change", change)
+            min_change = item.get("min_change", last_alert_change)
+            last_session = item.get("last_session", session)
 
-            spike_from_last = change - last_alert_change
-            spike_from_low = change - min_change
+            diff_from_last = change - last_alert_change
+            diff_from_min = change - min_change
 
-            # شرط التنبيه: صعود بـ SPIKE_THRESHOLD عن آخر تنبيه أو عن القاع المسجل بعد التنبيه
-            if spike_from_last >= SPIKE_THRESHOLD or (min_change < last_alert_change - 0.5 and spike_from_low >= SPIKE_THRESHOLD):
-                count += 1
-                spike_val = max(spike_from_last, spike_from_low)
-                spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike_val:.1f}% 📈)", count))
+            is_spike = (diff_from_last >= SPIKE_THRESHOLD) or (diff_from_min >= SPIKE_THRESHOLD)
+            is_session_change = (session != last_session)
+
+            if is_spike or is_session_change:
+                new_count = prev_count + 1
+                if is_spike:
+                    spike_val = max(diff_from_last, diff_from_min)
+                    status_title = f"تسارع زخم مفاجئ (+{spike_val:.1f}% 📈)"
+                else:
+                    status_title = f"تجدد الزخم في {SESSION_AR[session]} 🚨"
+
                 state[key] = {
-                    "change": change,
-                    "price": price,
-                    "rank": rank,
-                    "count": count,
+                    "count": new_count,
                     "last_alert_change": change,
-                    "min_change": change
+                    "min_change": change,
+                    "last_session": session,
+                    "price": price,
+                    "rank": rank
                 }
+                spike_entries.append((rank, row, status_title, new_count))
             else:
-                # تحديث القاع ومستوى التغير بدون إرسال تنبيه لتجهيز العداد للتنبيه القادم
-                last_data["min_change"] = min(min_change, change)
-                last_data["change"] = change
-                last_data["price"] = price
-                last_data["rank"] = rank
-                state[key] = last_data
+                # تحديث مستويات التراجع المؤقتة دون زيادة العداد للتجهيز للقفزة القادمة
+                item["min_change"] = min(min_change, change)
+                item["price"] = price
+                item["rank"] = rank
+                state[key] = item
+
+    # تحديث الذاكرة العامة والملف
+    GLOBAL_STATE = state
+    save_state(today, state)
 
     alerts = new_entries + spike_entries
 
@@ -332,8 +364,6 @@ def check_and_alert():
         print(f"[{session}] Sent {len(alerts)} alerts safely.")
     else:
         print(f"[{session}] Checked Top {SCAN_LIMIT}, no new entries or sudden spikes.")
-
-    save_state(today, state)
 
 
 def main():
