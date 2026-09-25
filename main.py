@@ -1,9 +1,9 @@
-"""US Top Gainers & Sudden Momentum Tracker.
+"""US Top Gainers & Sudden Momentum Tracker + Low Float Pre-Breakout Scanner.
 
-Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
-Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
-Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and 52-Week Range.
-Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (70k).
+Monitors:
+1. TradingView's Top Gainers (Pre-market, Market, After-hours).
+2. Low Float Pre-Breakout Stocks (Float < 20M, Daily +2% to +8%, Sudden 1-min Spike >= 1.5% & Vol >= 4x).
+Excludes OTC / Pink Sheets stocks completely.
 """
 
 import html
@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -27,13 +28,28 @@ SEEN_FILE = "seen.json"
 GLOBAL_STATE = {}
 GLOBAL_DATE = None
 
-# إعدادات الفلترة والشروط الصارمة
-MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
-MIN_VOL = 70_000                # السيولة والحجم الأدنى الصارم (70 ألف وأعلى لجميع الجلسات)
-SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
-SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة تنبيه
+# ذاكرة لحفظ حجوم التداول للدقائق الأخيرة للماسح الثاني (حساب متوسط 10 دقائق)
+MINUTE_VOL_HISTORY = defaultdict(list)
 
-# البورصات الرسمية المسموح بها فقط (استبعاد تام لأسهم OTC / OCPK)
+# ---------------------------------------------------------
+# إعدادات الفلترة والشروط العامة للماسح الأول (Top Gainers)
+# ---------------------------------------------------------
+MIN_PRICE = 0.55                # السعر الأدنى: 0.55 دولار
+MAX_PRICE = 50.00               # السعر الأعلى: 50.00 دولار
+MIN_VOL = 70_000                # السيولة والحجم الأدنى الصارم
+SCAN_LIMIT = 100                # البحث في قائمة أفضل 100 سهم
+SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر
+
+# ---------------------------------------------------------
+# إعدادات الفلترة للماسح الثاني (Low Float Pre-Breakout)
+# ---------------------------------------------------------
+MAX_FLOAT = 20_000_000          # أسهم الفلوت أقل من 20 مليون (يمكنك تغييرها إلى 30_000_000)
+PRE_MIN_CHANGE = 2.0            # التغير اليومي الأدنى +2%
+PRE_MAX_CHANGE = 8.0            # التغير اليومي الأقصى +8%
+SPIKE_1M_MIN = 1.5              # ارتفاع الدقيقة الأخيرة >= 1.5%
+VOL_MULT_THRESHOLD = 4.0        # حجم الدقيقة >= 4 أضعاف متوسط 10 دقائق
+
+# البورصات الرسمية المسموح بها فقط
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
 SESSION_AR = {
@@ -66,12 +82,25 @@ def current_session():
     return None
 
 
+def safe_float(val, default=0.0):
+    try:
+        if val is None or str(val).lower() == 'nan':
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+# =========================================================
+# الاستعلامات للماسح الأول (Top Gainers)
+# =========================================================
 def get_top_gainers_query(session):
     exchange_filter = col("exchange").isin(VALID_EXCHANGES)
 
     if session == "pre":
         filters = [
-            col("premarket_close") > MIN_PRICE, 
+            col("premarket_close") >= MIN_PRICE,
+            col("premarket_close") <= MAX_PRICE,
             col("premarket_change") > 0.0,
             col("premarket_volume") >= MIN_VOL,
             exchange_filter
@@ -80,7 +109,8 @@ def get_top_gainers_query(session):
         extra = ["premarket_close", "premarket_change", "premarket_volume"]
     elif session == "after":
         filters = [
-            col("postmarket_close") > MIN_PRICE, 
+            col("postmarket_close") >= MIN_PRICE,
+            col("postmarket_close") <= MAX_PRICE,
             col("postmarket_change") > 0.0,
             col("postmarket_volume") >= MIN_VOL,
             exchange_filter
@@ -89,7 +119,8 @@ def get_top_gainers_query(session):
         extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
     else:  # market
         filters = [
-            col("close") > MIN_PRICE, 
+            col("close") >= MIN_PRICE,
+            col("close") <= MAX_PRICE,
             col("change") > 0.0,
             col("volume") >= MIN_VOL,
             exchange_filter
@@ -115,10 +146,40 @@ def get_top_gainers_query(session):
     return query, sort_col, extra
 
 
-def run_screen(session):
-    query, sort_col, extra = get_top_gainers_query(session)
-    _, df = query.get_scanner_data()
-    return df
+# =========================================================
+# الاستعلام للماسح الثاني (Low Float Pre-Breakout)
+# =========================================================
+def get_low_float_prebreakout_query(session):
+    exchange_filter = col("exchange").isin(VALID_EXCHANGES)
+    price_c, chg_c, vol_c = DISPLAY[session]
+
+    filters = [
+        col(price_c) >= MIN_PRICE,
+        col(price_c) <= MAX_PRICE,
+        col(chg_c) >= PRE_MIN_CHANGE,
+        col(chg_c) <= PRE_MAX_CHANGE,
+        col("float_shares_outstanding") <= MAX_FLOAT,
+        col("change|1") >= SPIKE_1M_MIN,   # ارتفاع أخير بالدقيقة >= 1.5%
+        col(vol_c) >= MIN_VOL,
+        exchange_filter
+    ]
+
+    tech_cols = [
+        "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
+        "sector", "VWAP", "change|1", "volume|1", "float_shares_outstanding",
+        "price_52_week_high", "price_52_week_low"
+    ]
+    columns = list(dict.fromkeys(["name", price_c, chg_c, vol_c] + tech_cols))
+
+    query = (
+        Query()
+        .set_markets("america")
+        .select(*columns)
+        .where(col("type") == "stock", *filters)
+        .order_by("change|1", ascending=False)
+        .limit(50)
+    )
+    return query
 
 
 def load_state():
@@ -183,57 +244,28 @@ def calculate_levels(price, high, low, ema21, ema50):
     r_possible = r3 * 1.15
 
     return {
-        "t1": r1,
-        "t2": r2,
-        "t3": r3,
-        "t_max": r_max,
-        "t_possible": r_possible,
+        "t1": r1, "t2": r2, "t3": r3, "t_max": r_max, "t_possible": r_possible,
     }
 
 
-def safe_float(val, default=0.0):
-    try:
-        if val is None or str(val).lower() == 'nan':
-            return default
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-def check_and_alert():
-    global GLOBAL_STATE, GLOBAL_DATE
-
-    session = current_session()
-    if not session:
-        print("Outside US sessions, skipping check.")
-        return
-
-    today = datetime.now(NY).strftime("%Y-%m-%d")
-
-    # تهيئة الذاكرة إذا أشرقت شمس يوم جديد
-    if GLOBAL_DATE != today:
-        GLOBAL_DATE = today
-        file_date, loaded_state = load_state()
-        if file_date == today:
-            GLOBAL_STATE = loaded_state
-        else:
-            GLOBAL_STATE = {}
-
-    state = GLOBAL_STATE
+# =========================================================
+# تنفيذ الماسح الأول: Top Gainers & Momentum Spikes
+# =========================================================
+def check_top_gainers(session, today):
+    global GLOBAL_STATE
     price_c, chg_c, vol_c = DISPLAY[session]
 
     try:
-        df = run_screen(session)
+        query, _, _ = get_top_gainers_query(session)
+        _, df = query.get_scanner_data()
     except Exception as e:
-        print(f"[{session}] Error fetching data: {e}")
+        print(f"[{session}] [Top Gainers] Error fetching data: {e}")
         return
 
     if df is None or df.empty:
-        print(f"[{session}] No Top Gainers found.")
         return
 
-    print(f"[{datetime.now(NY).strftime('%H:%M:%S')}] [{session}] Fetched {len(df)} non-OTC high-volume rows.")
-
+    state = GLOBAL_STATE
     new_entries = []
     spike_entries = []
 
@@ -241,11 +273,9 @@ def check_and_alert():
         ticker = str(row['name']).strip().upper()
         change = safe_float(row[chg_c])
         price = safe_float(row[price_c])
-
         key = ticker
 
         if key not in state:
-            # تنبيه لأول مرة اليوم لهذا السهم
             count = 1
             state[key] = {
                 "count": count,
@@ -271,11 +301,7 @@ def check_and_alert():
 
             if is_spike or is_session_change:
                 new_count = prev_count + 1
-                if is_spike:
-                    spike_val = max(diff_from_last, diff_from_min)
-                    status_title = f"تسارع زخم مفاجئ (+{spike_val:.1f}% 📈)"
-                else:
-                    status_title = f"تجدد الزخم في {SESSION_AR[session]} 🚨"
+                status_title = f"تسارع زخم مفاجئ (+{max(diff_from_last, diff_from_min):.1f}% 📈)" if is_spike else f"تجدد الزخم في {SESSION_AR[session]} 🚨"
 
                 state[key] = {
                     "count": new_count,
@@ -287,16 +313,12 @@ def check_and_alert():
                 }
                 spike_entries.append((rank, row, status_title, new_count))
             else:
-                # تحديث مستويات التراجع المؤقتة دون زيادة العداد للتجهيز للقفزة القادمة
                 item["min_change"] = min(min_change, change)
                 item["price"] = price
                 item["rank"] = rank
                 state[key] = item
 
-    # تحديث الذاكرة العامة والملف
     GLOBAL_STATE = state
-    save_state(today, state)
-
     alerts = new_entries + spike_entries
 
     if alerts:
@@ -315,36 +337,26 @@ def check_and_alert():
             ema50 = safe_float(row.get('EMA50'), price * 0.97)
             
             sector_raw = str(row.get('sector', 'غير محدد'))
-            if sector_raw.lower() == 'nan' or not sector_raw:
-                sector = "غير محدد"
-            else:
-                sector = html.escape(sector_raw)
+            sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
                 
             vwap_val = safe_float(row.get('VWAP'), price)
             vol_val = safe_float(row.get(vol_c))
 
-            # حساب قمة وقاع 52 أسبوع والنسب المئوية
             h52 = safe_float(row.get('price_52_week_high'), price)
             l52 = safe_float(row.get('price_52_week_low'), price)
-            
             h52_diff = ((price - h52) / h52 * 100) if h52 > 0 else 0.0
             l52_diff = ((price - l52) / l52 * 100) if l52 > 0 else 0.0
 
-            # حساب مؤشرات الاتجاه
             chg_4h = safe_float(row.get('change|240'), abs(chg))
             chg_15m = safe_float(row.get('change|15'), abs(chg) / 3)
-
             pt_4h_count = max(1, int(chg_4h / 2.0))
             pt_4h_alert = " ( ⚠️اتجاه متقدم)" if pt_4h_count > 4 else ""
-
             pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
 
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
-            repeat_str = f"🔴 <b>[تكرار {count}]</b>"
-
             block_lines = [
-                f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}",
+                f"🔥 #{rank} <b>{ticker}</b> — {status_title} 🔴 <b>[تكرار {count}]</b>",
                 f"🏢 القطاع: <b>{sector}</b>",
                 f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
@@ -357,23 +369,105 @@ def check_and_alert():
                 f"<i>(هذا تنبيه ليس توصيه المرجع في الدخول ماتراه على الشارت)</i>",
                 f"<i>(البوت يرسل أسهم ليست شرعيه انتبه مسؤليتك)</i>"
             ]
-
             alert_blocks.append("\n".join(block_lines))
 
         send_alerts_in_batches(header, alert_blocks)
-        print(f"[{session}] Sent {len(alerts)} alerts safely.")
-    else:
-        print(f"[{session}] Checked Top {SCAN_LIMIT}, no new entries or sudden spikes.")
+
+
+# =========================================================
+# تنفيذ الماسح الثاني: Low Float Pre-Breakout Hunter
+# =========================================================
+def check_low_float_prebreakout(session, today):
+    price_c, chg_c, vol_c = DISPLAY[session]
+
+    try:
+        query = get_low_float_prebreakout_query(session)
+        _, df = query.get_scanner_data()
+    except Exception as e:
+        print(f"[{session}] [Low Float Scanner] Error fetching data: {e}")
+        return
+
+    if df is None or df.empty:
+        return
+
+    alert_blocks = []
+
+    for _, row in df.iterrows():
+        ticker = str(row['name']).strip().upper()
+        vol_1m = safe_float(row.get('volume|1'), 0)
+        
+        # حفظ تاريخ حجم الدقيقة للحساب التراكمي
+        MINUTE_VOL_HISTORY[ticker].append(vol_1m)
+        if len(MINUTE_VOL_HISTORY[ticker]) > 10:
+            MINUTE_VOL_HISTORY[ticker].pop(0)
+
+        # حساب متوسط حجم تداول الدقيقة
+        history = MINUTE_VOL_HISTORY[ticker]
+        if len(history) >= 2:
+            avg_10m_vol = sum(history[:-1]) / len(history[:-1])
+        else:
+            # في حال عدم وجود سجل كافٍ، يستعين بمتوسط الدقيقة اليومي العام
+            avg_10d_vol = safe_float(row.get('average_volume_10d_calc'), 100_000)
+            avg_10m_vol = avg_10d_vol / 390.0  # تقسيم على دقائق يوم التداول
+
+        # التحقق الصارم من شرط حجم الدقيقة الحالية (>= 4 أضعاف المتوسط)
+        if avg_10m_vol > 0 and (vol_1m / avg_10m_vol) >= VOL_MULT_THRESHOLD:
+            vol_ratio = vol_1m / avg_10m_vol
+            price = safe_float(row[price_c])
+            chg = safe_float(row[chg_c])
+            chg_1m = safe_float(row.get('change|1'))
+            float_shares = safe_float(row.get('float_shares_outstanding')) / 1_000_000  # تحويل لملايين
+            sector_raw = str(row.get('sector', 'غير محدد'))
+            sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
+            tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+
+            block_lines = [
+                f"💣 <b>صيد قبل الانفجار | Low Float Spike</b> — <b>{ticker}</b>",
+                f"🏢 القطاع: <b>{sector}</b> | 🎈 الفلوت: <b>{float_shares:.2f}M سهم</b>",
+                f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b> (في القاع)",
+                f"⚡ <b>قفزة الدقيقة الأخيرة: +{chg_1m:.2f}% 🚀</b>",
+                f"📊 <b>حجم الدقيقة: {vol_1m:,.0f} سهم ({vol_ratio:.1f}x ضعف المتوسط) 🔥</b>",
+                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
+                f"<i>(سهم فلوت منخفض يتحرك الآن قبل الانفجار الكلي)</i>"
+            ]
+            alert_blocks.append("\n".join(block_lines))
+
+    if alert_blocks:
+        header = f"🎯 <b>تنبيه صيد الاختراق المبكر (Low Float)</b> | {SESSION_AR[session]}"
+        send_alerts_in_batches(header, alert_blocks)
+
+
+def check_and_alert():
+    global GLOBAL_STATE, GLOBAL_DATE
+
+    session = current_session()
+    if not session:
+        print("Outside US sessions, skipping check.")
+        return
+
+    today = datetime.now(NY).strftime("%Y-%m-%d")
+
+    if GLOBAL_DATE != today:
+        GLOBAL_DATE = today
+        file_date, loaded_state = load_state()
+        GLOBAL_STATE = loaded_state if file_date == today else {}
+        MINUTE_VOL_HISTORY.clear()
+
+    # تشغيل الماسحين متتاليين
+    check_top_gainers(session, today)
+    check_low_float_prebreakout(session, today)
+
+    save_state(today, GLOBAL_STATE)
 
 
 def main():
-    print("Starting tracker... Loop interval set to every 3 minutes.")
+    print("Starting tracker (Top Gainers + Low Float Pre-Breakout Scanner)...")
     while True:
         try:
             check_and_alert()
         except Exception as e:
             print(f"Error during check: {e}")
-        time.sleep(180)  # الانتظار 3 دقائق (180 ثانية)
+        time.sleep(180)  # الفحص كل 3 دقائق
 
 
 if __name__ == "__main__":
