@@ -27,7 +27,6 @@ MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 35_000                # السيولة والحجم الأدنى الصارم (35 ألف وأعلى لجميع الجلسات)
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
-SLEEP_INTERVAL = 600           # زمن الانتظار بين كل فحص وفحص (600 ثانية = 10 دقائق)
 
 # البورصات الرسمية المسموح بها فقط (استبعاد تام لأسهم OTC / OCPK)
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -87,7 +86,7 @@ def get_top_gainers_query(session):
         filters = [
             col("close") > MIN_PRICE, 
             col("change") > 0.0,
-            col("volume") >= MIN_VOL,  # تم الرفع إلى 35 ألف لضمان السيولة الصارمة
+            col("volume") >= MIN_VOL,
             exchange_filter
         ]
         sort_col = "change"
@@ -276,7 +275,6 @@ def check_and_alert():
             pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
 
             # تحقق فعلي من وجود CHOCH (اختراق هيكلي صاعد)
-            # يتحقق عند اختراق القمة أو تداول السعر أعلى من VWAP و EMA21 و EMA50
             is_choch = (price >= high and high > 0) or (price > vwap_val and price > ema50 and ema50 > 0 and price > ema21)
 
             lvl = calculate_levels(price, high, low, ema21, ema50)
@@ -292,7 +290,6 @@ def check_and_alert():
                 f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>"
             ]
 
-            # إظهار سطر CHOCH فقط إذا كان متحققاً فعلياً
             if is_choch:
                 block_lines.append("• CHOCH: <b>اختراق هيكلي صاعد ⚡</b>")
 
@@ -312,15 +309,11 @@ def check_and_alert():
 
 
 def main():
-    print("Bot started with 10-minute continuous loop...")
-    while True:
-        try:
-            check_and_alert()
-        except Exception as e:
-            print(f"Error during check: {e}")
-        
-        # الانتظار 10 دقائق (600 ثانية)
-        time.sleep(SLEEP_INTERVAL)
+    print("Executing single-run check...")
+    try:
+        check_and_alert()
+    except Exception as e:
+        print(f"Error during check: {e}")
 
 
 if __name__ == "__main__":
