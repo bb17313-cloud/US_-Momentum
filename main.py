@@ -2,7 +2,12 @@
 
 Monitors:
 1. TradingView's Top Gainers (Pre-market, Market, After-hours).
-2. Low Float Pre-Breakout Stocks (Float < 20M, Daily +2% to +8%, Sudden 1-min Spike >= 1.5% & Vol >= 4x).
+2. Low Float Pre-Breakout Stocks:
+   - Float <= 20M
+   - Daily Change: +2% to +8%
+   - Total Volume >= 40,000
+   - Sudden Spike: 1-min >= 1.5% OR 5-min >= 1.5%
+   - 1-min Volume >= 4x (10-min average)
 Excludes OTC / Pink Sheets stocks completely.
 """
 
@@ -36,17 +41,18 @@ MINUTE_VOL_HISTORY = defaultdict(list)
 # ---------------------------------------------------------
 MIN_PRICE = 0.55                # السعر الأدنى: 0.55 دولار
 MAX_PRICE = 50.00               # السعر الأعلى: 50.00 دولار
-MIN_VOL = 70_000                # السيولة والحجم الأدنى الصارم
+MIN_VOL = 70_000                # السيولة والحجم الأدنى للماسح الأول
 SCAN_LIMIT = 100                # البحث في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر
 
 # ---------------------------------------------------------
 # إعدادات الفلترة للماسح الثاني (Low Float Pre-Breakout)
 # ---------------------------------------------------------
-MAX_FLOAT = 20_000_000          # أسهم الفلوت أقل من 20 مليون (يمكنك تغييرها إلى 30_000_000)
+MAX_FLOAT = 20_000_000          # أسهم الفلوت أقل من أو يساوي 20 مليون
 PRE_MIN_CHANGE = 2.0            # التغير اليومي الأدنى +2%
 PRE_MAX_CHANGE = 8.0            # التغير اليومي الأقصى +8%
-SPIKE_1M_MIN = 1.5              # ارتفاع الدقيقة الأخيرة >= 1.5%
+PRE_MIN_VOL = 40_000            # الحجم الإجمالي الأدنى للماسح الثاني (40 ألف سهم)
+SPIKE_MIN = 1.5                 # قفزة الزخم الأدنى: 1.5% (على شمعة الدقيقة أو 5 دقائق)
 VOL_MULT_THRESHOLD = 4.0        # حجم الدقيقة >= 4 أضعاف متوسط 10 دقائق
 
 # البورصات الرسمية المسموح بها فقط
@@ -159,14 +165,14 @@ def get_low_float_prebreakout_query(session):
         col(chg_c) >= PRE_MIN_CHANGE,
         col(chg_c) <= PRE_MAX_CHANGE,
         col("float_shares_outstanding") <= MAX_FLOAT,
-        col("change|1") >= SPIKE_1M_MIN,   # ارتفاع أخير بالدقيقة >= 1.5%
-        col(vol_c) >= MIN_VOL,
+        col(vol_c) >= PRE_MIN_VOL,             # 40,000 سهم
         exchange_filter
     ]
 
+    # جلب تغير الدقيقة الأخيرة وتغير الـ 5 دقائق للتحقق
     tech_cols = [
         "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
-        "sector", "VWAP", "change|1", "volume|1", "float_shares_outstanding",
+        "sector", "VWAP", "change|1", "change|5", "volume|1", "float_shares_outstanding",
         "price_52_week_high", "price_52_week_low"
     ]
     columns = list(dict.fromkeys(["name", price_c, chg_c, vol_c] + tech_cols))
@@ -176,7 +182,7 @@ def get_low_float_prebreakout_query(session):
         .set_markets("america")
         .select(*columns)
         .where(col("type") == "stock", *filters)
-        .order_by("change|1", ascending=False)
+        .order_by(chg_c, ascending=False)
         .limit(50)
     )
     return query
@@ -394,6 +400,13 @@ def check_low_float_prebreakout(session, today):
 
     for _, row in df.iterrows():
         ticker = str(row['name']).strip().upper()
+        chg_1m = safe_float(row.get('change|1'))
+        chg_5m = safe_float(row.get('change|5'))
+
+        # تحقق شرط (1.5% أو أكثر في آخر دقيقة OR 1.5% أو أكثر في شمعة الـ 5 دقائق)
+        if chg_1m < SPIKE_MIN and chg_5m < SPIKE_MIN:
+            continue
+
         vol_1m = safe_float(row.get('volume|1'), 0)
         
         # حفظ تاريخ حجم الدقيقة للحساب التراكمي
@@ -406,26 +419,32 @@ def check_low_float_prebreakout(session, today):
         if len(history) >= 2:
             avg_10m_vol = sum(history[:-1]) / len(history[:-1])
         else:
-            # في حال عدم وجود سجل كافٍ، يستعين بمتوسط الدقيقة اليومي العام
             avg_10d_vol = safe_float(row.get('average_volume_10d_calc'), 100_000)
-            avg_10m_vol = avg_10d_vol / 390.0  # تقسيم على دقائق يوم التداول
+            avg_10m_vol = avg_10d_vol / 390.0
 
-        # التحقق الصارم من شرط حجم الدقيقة الحالية (>= 4 أضعاف المتوسط)
+        # شرط الانفجار في الحجم (>= 4 أضعاف متوسط آخر 10 دقائق)
         if avg_10m_vol > 0 and (vol_1m / avg_10m_vol) >= VOL_MULT_THRESHOLD:
             vol_ratio = vol_1m / avg_10m_vol
             price = safe_float(row[price_c])
             chg = safe_float(row[chg_c])
-            chg_1m = safe_float(row.get('change|1'))
-            float_shares = safe_float(row.get('float_shares_outstanding')) / 1_000_000  # تحويل لملايين
+            float_shares = safe_float(row.get('float_shares_outstanding')) / 1_000_000
             sector_raw = str(row.get('sector', 'غير محدد'))
             sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+
+            # توضيح الفريم الذي حدثت عليه القفزة
+            spike_info = []
+            if chg_1m >= SPIKE_MIN:
+                spike_info.append(f"دقيقة: +{chg_1m:.2f}%")
+            if chg_5m >= SPIKE_MIN:
+                spike_info.append(f"5 دقائق: +{chg_5m:.2f}%")
+            spike_str = " | ".join(spike_info)
 
             block_lines = [
                 f"💣 <b>صيد قبل الانفجار | Low Float Spike</b> — <b>{ticker}</b>",
                 f"🏢 القطاع: <b>{sector}</b> | 🎈 الفلوت: <b>{float_shares:.2f}M سهم</b>",
                 f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b> (في القاع)",
-                f"⚡ <b>قفزة الدقيقة الأخيرة: +{chg_1m:.2f}% 🚀</b>",
+                f"⚡ <b>قفزة الزخم: {spike_str} 🚀</b>",
                 f"📊 <b>حجم الدقيقة: {vol_1m:,.0f} سهم ({vol_ratio:.1f}x ضعف المتوسط) 🔥</b>",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
                 f"<i>(سهم فلوت منخفض يتحرك الآن قبل الانفجار الكلي)</i>"
