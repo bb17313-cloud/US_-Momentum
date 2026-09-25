@@ -27,7 +27,7 @@ MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 35_000                # السيولة والحجم الأدنى الصارم (35 ألف وأعلى لجميع الجلسات)
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
-SLEEP_INTERVAL = 120           # زمن الانتظار بين كل فحص وفحص (120 ثانية = دقيقتين)
+SLEEP_INTERVAL = 600           # زمن الانتظار بين كل فحص وفحص (600 ثانية = 10 دقائق)
 
 # البورصات الرسمية المسموح بها فقط (استبعاد تام لأسهم OTC / OCPK)
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -312,14 +312,14 @@ def check_and_alert():
 
 
 def main():
-    print("Bot started with 2-minute continuous loop...")
+    print("Bot started with 10-minute continuous loop...")
     while True:
         try:
             check_and_alert()
         except Exception as e:
             print(f"Error during check: {e}")
         
-        # الانتظار دقيقتين (120 ثانية)
+        # الانتظار 10 دقائق (600 ثانية)
         time.sleep(SLEEP_INTERVAL)
 
 
