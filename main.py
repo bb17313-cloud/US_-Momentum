@@ -3,7 +3,7 @@
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
 Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and 52-Week Range.
-Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (35k).
+Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (70k).
 """
 
 import html
@@ -25,7 +25,7 @@ SEEN_FILE = "seen.json"
 
 # إعدادات الفلترة والشروط الصارمة
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
-MIN_VOL = 35_000                # السيولة والحجم الأدنى الصارم (35 ألف وأعلى لجميع الجلسات)
+MIN_VOL = 70_000                # السيولة والحجم الأدنى الصارم (70 ألف وأعلى لجميع الجلسات)
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
 
@@ -310,11 +310,13 @@ def check_and_alert():
 
 
 def main():
-    print("Executing single-run check...")
-    try:
-        check_and_alert()
-    except Exception as e:
-        print(f"Error during check: {e}")
+    print("Starting tracker... Loop interval set to every 3 minutes.")
+    while True:
+        try:
+            check_and_alert()
+        except Exception as e:
+            print(f"Error during check: {e}")
+        time.sleep(180)  # الانتظار 3 دقائق (180 ثانية)
 
 
 if __name__ == "__main__":
