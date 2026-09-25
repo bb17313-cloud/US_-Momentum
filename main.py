@@ -172,12 +172,15 @@ def calculate_levels(price, high, low, ema21, ema50):
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
+    r_max = r3 * 1.08
+    r_possible = r3 * 1.15
 
     return {
         "t1": r1,
         "t2": r2,
         "t3": r3,
-        "t_max": r3 * 1.08,
+        "t_max": r_max,
+        "t_possible": r_possible,
     }
 
 
@@ -225,6 +228,7 @@ def check_and_alert():
         if not last_data:
             count = 1
             new_entries.append((rank, row, "جديد في القائمة 🚨", count))
+            state[key] = {"change": change, "price": price, "rank": rank, "count": count}
         else:
             old_change = last_data["change"]
             count = last_data.get("count", 1)
@@ -232,8 +236,7 @@ def check_and_alert():
                 count += 1
                 spike = change - old_change
                 spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", count))
-
-        state[key] = {"change": change, "price": price, "rank": rank, "count": count}
+                state[key] = {"change": change, "price": price, "rank": rank, "count": count}
 
     alerts = new_entries + spike_entries
 
@@ -290,7 +293,7 @@ def check_and_alert():
                 f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>",
                 f"• قمة 52 أسبوع: <b>${h52:.2f}</b> ({h52_diff:+.1f}%)",
                 f"• قاع 52 أسبوع: <b>${l52:.2f}</b> ({l52_diff:+.1f}%)",
-                f"🎯 الأهداف: ${lvl['t1']:.2f} -&gt; ${lvl['t2']:.2f} -&gt; ${lvl['t3']:.2f} (أقصى هدف: ${lvl['t_max']:.2f})",
+                f"🎯 احتمالية TP (${lvl['t1']:.2f}) (${lvl['t2']:.2f}) (${lvl['t3']:.2f}) (${lvl['t_max']:.2f}) ممكن(${lvl['t_possible']:.2f})",
                 f"📊 VWAP: <b>${vwap_val:.2f}</b>",
                 f"<i>(هذا تنبيه ليس توصيه المرجع في الدخول ماتراه على الشارت)</i>",
                 f"<i>(البوت يرسل أسهم ليست شرعيه انتبه مسؤليتك)</i>"
