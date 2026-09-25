@@ -2,9 +2,10 @@
 
 Monitors TradingView's official Top Gainers for Pre-market, Market, and After-hours.
 Alerts on NEW tickers or SUDDEN spikes in percentage gain across Top 100.
-Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and Conditional CHOCH.
+Includes Sector, Hyperlinked TradingView text, Repeat count, Real VWAP, Power Trends, and 52-Week Range.
 Excludes OTC / Pink Sheets stocks completely and enforces strict minimum volume (35k).
 """
+
 import html
 import json
 import os
@@ -82,7 +83,7 @@ def get_top_gainers_query(session):
         ]
         sort_col = "postmarket_change"
         extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
-    else: # market
+    else:  # market
         filters = [
             col("close") > MIN_PRICE, 
             col("change") > 0.0,
@@ -94,7 +95,8 @@ def get_top_gainers_query(session):
 
     tech_cols = [
         "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
-        "sector", "VWAP", "change|240", "change|15"
+        "sector", "VWAP", "change|240", "change|15",
+        "price_52_week_high", "price_52_week_low"
     ]
     columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
@@ -171,17 +173,11 @@ def calculate_levels(price, high, low, ema21, ema50):
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
 
-    support_intraday = min(low, ema21 if 0 < ema21 < price else low)
-    support_ilz = min(ema50 if 0 < ema50 < price else support_intraday * 0.98, pivot)
-
     return {
-        "support_intraday": support_intraday,
-        "support_ilz": support_ilz,
         "t1": r1,
         "t2": r2,
         "t3": r3,
         "t_max": r3 * 1.08,
-        "stop_1": support_intraday * 0.985,
     }
 
 
@@ -228,7 +224,7 @@ def check_and_alert():
 
         if not last_data:
             count = 1
-            new_entries.append((rank, row, "دخول جديد إلى القائمة 🚨", count))
+            new_entries.append((rank, row, "جديد في القائمة 🚨", count))
         else:
             old_change = last_data["change"]
             count = last_data.get("count", 1)
@@ -265,6 +261,13 @@ def check_and_alert():
             vwap_val = safe_float(row.get('VWAP'), price)
             vol_val = safe_float(row.get(vol_c))
 
+            # حساب قمة وقاع 52 أسبوع والنسب المئوية
+            h52 = safe_float(row.get('price_52_week_high'), price)
+            l52 = safe_float(row.get('price_52_week_low'), price)
+            
+            h52_diff = ((price - h52) / h52 * 100) if h52 > 0 else 0.0
+            l52_diff = ((price - l52) / l52 * 100) if l52 > 0 else 0.0
+
             # حساب مؤشرات الاتجاه
             chg_4h = safe_float(row.get('change|240'), abs(chg))
             chg_15m = safe_float(row.get('change|15'), abs(chg) / 3)
@@ -274,9 +277,6 @@ def check_and_alert():
 
             pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
 
-            # تحقق فعلي من وجود CHOCH (اختراق هيكلي صاعد)
-            is_choch = (price >= high and high > 0) or (price > vwap_val and price > ema50 and ema50 > 0 and price > ema21)
-
             lvl = calculate_levels(price, high, low, ema21, ema50)
 
             repeat_str = f"🔴 <b>[تكرار {count}]</b>"
@@ -284,19 +284,17 @@ def check_and_alert():
             block_lines = [
                 f"🔥 #{rank} <b>{ticker}</b> — {status_title} {repeat_str}",
                 f"🏢 القطاع: <b>{sector}</b>",
-                f"💵 السعر: <b>{price:.2f}$</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
+                f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
                 f"• Power Trend 4H: <b>{pt_4h_count} شمعة ⚡</b>{pt_4h_alert}",
-                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>"
+                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>",
+                f"• قمة 52 أسبوع: <b>${h52:.2f}</b> ({h52_diff:+.1f}%)",
+                f"• قاع 52 أسبوع: <b>${l52:.2f}</b> ({l52_diff:+.1f}%)",
+                f"🎯 الأهداف: ${lvl['t1']:.2f} -&gt; ${lvl['t2']:.2f} -&gt; ${lvl['t3']:.2f} (أقصى هدف: ${lvl['t_max']:.2f})",
+                f"📊 VWAP: <b>${vwap_val:.2f}</b>",
+                f"<i>(هذا تنبيه ليس توصيه المرجع في الدخول ماتراه على الشارت)</i>",
+                f"<i>(البوت يرسل أسهم ليست شرعيه انتبه مسؤليتك)</i>"
             ]
-
-            if is_choch:
-                block_lines.append("• CHOCH: <b>اختراق هيكلي صاعد ⚡</b>")
-
-            block_lines.extend([
-                f"🎯 الأهداف: {lvl['t1']:.2f}$ -&gt; {lvl['t2']:.2f}$ -&gt; {lvl['t3']:.2f}$ (أقصى هدف: {lvl['t_max']:.2f}$)",
-                f"🛡 الدعم: {lvl['support_intraday']:.2f}$ | ⛔️ الوقف: {lvl['stop_1']:.2f}$ | 📊 VWAP: <b>{vwap_val:.2f}$</b>"
-            ])
 
             alert_blocks.append("\n".join(block_lines))
 
