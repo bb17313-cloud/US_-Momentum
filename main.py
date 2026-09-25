@@ -27,7 +27,7 @@ SEEN_FILE = "seen.json"
 MIN_PRICE = 0.60                # السعر أعلى من 0.60 دولار
 MIN_VOL = 70_000                # السيولة والحجم الأدنى الصارم (70 ألف وأعلى لجميع الجلسات)
 SCAN_LIMIT = 100                # البحث والمسح في قائمة أفضل 100 سهم
-SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة محفوظة
+SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر عن آخر قراءة تنبيه
 
 # البورصات الرسمية المسموح بها فقط (استبعاد تام لأسهم OTC / OCPK)
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -218,25 +218,52 @@ def check_and_alert():
     spike_entries = []
 
     for rank, (_, row) in enumerate(df.iterrows(), start=1):
-        ticker = str(row['name']).strip()
+        ticker = str(row['name']).strip().upper()
         change = safe_float(row[chg_c])
         price = safe_float(row[price_c])
 
-        key = f"{session}:{ticker}"
+        key = ticker  # المفتاح هو الرمز مباشرة لتراكم التكرار طوال اليوم
         last_data = state.get(key)
 
         if not last_data:
             count = 1
             new_entries.append((rank, row, "جديد في القائمة 🚨", count))
-            state[key] = {"change": change, "price": price, "rank": rank, "count": count}
+            state[key] = {
+                "change": change,
+                "price": price,
+                "rank": rank,
+                "count": count,
+                "last_alert_change": change,
+                "min_change": change
+            }
         else:
-            old_change = last_data["change"]
+            last_alert_change = last_data.get("last_alert_change", last_data.get("change", change))
+            min_change = last_data.get("min_change", last_alert_change)
             count = last_data.get("count", 1)
-            if change - old_change >= SPIKE_THRESHOLD:
+
+            spike_from_last = change - last_alert_change
+            spike_from_low = change - min_change
+
+            # شرط التنبيه: صعود بـ SPIKE_THRESHOLD عن آخر تنبيه أو عن القاع المسجل بعد التنبيه
+            if spike_from_last >= SPIKE_THRESHOLD or (min_change < last_alert_change - 0.5 and spike_from_low >= SPIKE_THRESHOLD):
                 count += 1
-                spike = change - old_change
-                spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike:.1f}% 📈)", count))
-                state[key] = {"change": change, "price": price, "rank": rank, "count": count}
+                spike_val = max(spike_from_last, spike_from_low)
+                spike_entries.append((rank, row, f"تسارع زخم مفاجئ (+{spike_val:.1f}% 📈)", count))
+                state[key] = {
+                    "change": change,
+                    "price": price,
+                    "rank": rank,
+                    "count": count,
+                    "last_alert_change": change,
+                    "min_change": change
+                }
+            else:
+                # تحديث القاع ومستوى التغير بدون إرسال تنبيه لتجهيز العداد للتنبيه القادم
+                last_data["min_change"] = min(min_change, change)
+                last_data["change"] = change
+                last_data["price"] = price
+                last_data["rank"] = rank
+                state[key] = last_data
 
     alerts = new_entries + spike_entries
 
