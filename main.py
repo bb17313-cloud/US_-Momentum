@@ -60,7 +60,7 @@ VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
 SESSION_AR = {
     "pre": "قبل الافتتاح (Pre-Market)", 
-    "market": "الجلسة النظامية (Market)", 
+    "market": "الجلسة الرئيسية (Market)", 
     "after": "بعد الإغلاق (After-Hours)"
 }
 
@@ -169,7 +169,6 @@ def get_low_float_prebreakout_query(session):
         exchange_filter
     ]
 
-    # جلب تغير الدقيقة الأخيرة وتغير الـ 5 دقائق للتحقق
     tech_cols = [
         "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
         "sector", "VWAP", "change|1", "change|5", "volume|1", "float_shares_outstanding",
@@ -440,19 +439,19 @@ def check_low_float_prebreakout(session, today):
                 spike_info.append(f"5 دقائق: +{chg_5m:.2f}%")
             spike_str = " | ".join(spike_info)
 
+            # قالب التنبيه المحدث للماسح الثاني
             block_lines = [
-                f"💣 <b>صيد قبل الانفجار | Low Float Spike</b> — <b>{ticker}</b>",
+                f"💣 | <b>Low Float Spike</b> — <b>{ticker}</b>",
                 f"🏢 القطاع: <b>{sector}</b> | 🎈 الفلوت: <b>{float_shares:.2f}M سهم</b>",
                 f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b> (في القاع)",
                 f"⚡ <b>قفزة الزخم: {spike_str} 🚀</b>",
                 f"📊 <b>حجم الدقيقة: {vol_1m:,.0f} سهم ({vol_ratio:.1f}x ضعف المتوسط) 🔥</b>",
-                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
-                f"<i>(سهم فلوت منخفض يتحرك الآن قبل الانفجار الكلي)</i>"
+                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>"
             ]
             alert_blocks.append("\n".join(block_lines))
 
     if alert_blocks:
-        header = f"🎯 <b>تنبيه صيد الاختراق المبكر (Low Float)</b> | {SESSION_AR[session]}"
+        header = f"🎯 <b>سهم فلوت  منخفض (Low Float)</b> | {SESSION_AR[session]}"
         send_alerts_in_batches(header, alert_blocks)
 
 
