@@ -1,218 +1,195 @@
-"""US Top Gainers & Sudden Momentum Tracker + Low Float Pre-Breakout Scanner.
-
-Monitors:
-1. TradingView's Top Gainers (Pre-market, Market, After-hours).
-2. Low Float Pre-Breakout Stocks:
-   - Float <= 20M
-   - Daily Change: +2% to +8%
-   - Total Volume >= 40,000
-   - Sudden Spike: 1-min >= 1.5% OR 5-min >= 1.5%
-   - 1-min Volume >= 4x (10-min average)
-Excludes OTC / Pink Sheets stocks completely.
-"""
-
-import html
 import json
 import os
 import sys
-import time
-from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
 from tradingview_screener import Query, col
 
-TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+# إعدادات التلغرام من متغيرات البيئة
+TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
-NY = ZoneInfo("America/New_York")
-SEEN_FILE = "seen.json"
+RIYADH = ZoneInfo("Asia/Riyadh")
+SEEN_FILE = "seen_saudi.json"
 
-# ذاكرة عامة في الرام لضمان عدم استعادة الذاكرة الفارغة
-GLOBAL_STATE = {}
-GLOBAL_DATE = None
-
-# ذاكرة لحفظ حجوم التداول للدقائق الأخيرة للماسح الثاني (حساب متوسط 10 دقائق)
-MINUTE_VOL_HISTORY = defaultdict(list)
-
-# ---------------------------------------------------------
-# إعدادات الفلترة والشروط العامة للماسح الأول (Top Gainers)
-# ---------------------------------------------------------
-MIN_PRICE = 0.55                # السعر الأدنى: 0.55 دولار
-MAX_PRICE = 50.00               # السعر الأعلى: 50.00 دولار
-MIN_VOL = 70_000                # السيولة والحجم الأدنى للماسح الأول
-SCAN_LIMIT = 100                # البحث في قائمة أفضل 100 سهم
-SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر
-
-# ---------------------------------------------------------
-# إعدادات الفلترة للماسح الثاني (Low Float Pre-Breakout)
-# ---------------------------------------------------------
-MAX_FLOAT = 20_000_000          # أسهم الفلوت أقل من أو يساوي 20 مليون
-PRE_MIN_CHANGE = 2.0            # التغير اليومي الأدنى +2%
-PRE_MAX_CHANGE = 8.0            # التغير اليومي الأقصى +8%
-PRE_MIN_VOL = 40_000            # الحجم الإجمالي الأدنى للماسح الثاني (40 ألف سهم)
-SPIKE_MIN = 1.5                 # قفزة الزخم الأدنى: 1.5% (على شمعة الدقيقة أو 5 دقائق)
-VOL_MULT_THRESHOLD = 4.0        # حجم الدقيقة >= 4 أضعاف متوسط 10 دقائق
-
-# البورصات الرسمية المسموح بها فقط
-VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
-
-SESSION_AR = {
-    "pre": "قبل الافتتاح (Pre-Market)", 
-    "market": "الجلسة الرئيسية (Market)", 
-    "after": "بعد الإغلاق (After-Hours)"
-}
-
-DISPLAY = {
-    "pre": ("premarket_close", "premarket_change", "premarket_volume"),
-    "market": ("close", "change", "volume"),
-    "after": ("postmarket_close", "postmarket_change", "postmarket_volume"),
-}
+MAX_SHOWN = 10  # الحد الأقصى للأسهم المعروضة في الرسالة الواحدة
 
 
-def current_session():
-    forced = os.environ.get("FORCE_SESSION", "").strip()
-    if forced in DISPLAY:
-        return forced
-    now = datetime.now(NY)
-    if now.weekday() >= 5:
-        return None
-    minutes = now.hour * 60 + now.minute
-    if 4 * 60 <= minutes < 9 * 60 + 30:
-        return "pre"
-    if 9 * 60 + 30 <= minutes < 16 * 60:
-        return "market"
-    if 16 * 60 <= minutes < 20 * 60:
-        return "after"
-    return None
+def get_saudi_stocks_dict():
+    """قائمة الأسهم السعودية (222 سهم)"""
+    return {
+        "2030": "المصافي", "2222": "أرامكو السعودية", "2380": "بترو رابغ", "2381": "الحفر العربية",
+        "2382": "اديس", "4030": "البحري", "1201": "تكوين", "1202": "ميكو", "1210": "بي سي آي",
+        "1211": "معادن", "1301": "أسلاك", "1304": "اليمامة للحديد", "1320": "أنابيب السعودية",
+        "1321": "أنابيب الشرق", "1322": "أماك", "1323": "يو سي آي سي", "1324": "صالح الراشد",
+        "2001": "كيمانول", "2010": "سابك", "2020": "سابك للمغذيات الزراعية", "2060": "التصنيع",
+        "2090": "جيسكو", "2150": "زجاج", "2170": "اللجين", "2180": "فيبكو", "2200": "أنابيب",
+        "2210": "نماء للكيماويات", "2220": "معدنية", "2223": "لوبريف", "2240": "صناعات",
+        "2250": "المجموعة السعودية", "2290": "ينساب", "2300": "صناعة الورق", "2310": "سبكيم العالمية",
+        "2330": "المتقدمة", "2350": "كيان السعودية", "2360": "الفخارية", "3002": "اسمنت نجران",
+        "3003": "اسمنت المدينة", "3004": "اسمنت الشمالية", "3005": "أسمنت أم القرى", "3007": "الواحة",
+        "3008": "الكثيري", "3010": "اسمنت العربية", "3020": "أسمنت اليمامة", "3030": "اسمنت السعودية",
+        "3040": "اسمنت القصيم", "3050": "اسمنت الجنوب", "3060": "أسمنت ينبع", "3080": "اسمنت الشرقية",
+        "3090": "اسمنت تبوك", "3091": "أسمنت الجوف", "3092": "اسمنت الرياض", "4143": "تالكو",
+        "1212": "استرا الصناعية", "1214": "شاكر", "1302": "يوان", "1303": "الصناعات الكهربائية",
+        "2040": "الخزف السعودي", "2110": "الكابلات السعودية", "2160": "اميانتيت", "2320": "البابطين",
+        "2370": "مسك", "4110": "باتك", "4140": "صادرات", "4141": "العمران", "4142": "كابلات الرياض",
+        "4144": "رووم", "4145": "او جي سي", "4146": "جاز", "4147": "سي جي اس", "4148": "الوسائل الصناعية",
+        "1831": "مهارة", "1832": "صدر", "1833": "الموارد", "1834": "سماسكو", "1835": "تمكين",
+        "4270": "طباعة وتغليف", "6004": "كاتريون", "2190": "سيسكو القابضة", "4031": "الأرضية",
+        "4040": "سابتكو", "4260": "بدجت السعودية", "4261": "ذيب", "4262": "لومي", "4263": "سال",
+        "4264": "طيران ناس", "4265": "شري", "1213": "نسيج", "2130": "صدق", "2340": "ارتيكس",
+        "4011": "لازوردي", "4012": "الأاصيل", "1810": "سيرا", "1820": "بان", "1830": "لحام للرياضة",
+        "4090": "طيبة", "4170": "شمس", "4250": "جيل عمر", "4290": "الخليج للتدريب", "4291": "الوطنية للتعليم",
+        "4292": "عطاء", "6002": "هرفي للأغذية", "6012": "ريدان", "6013": "التطويرية الغذائية",
+        "6014": "التمار", "6015": "أمريكانا", "6016": "برغرايززر", "6017": "جاهز", "6018": "الأندية للرياضة",
+        "6019": "المسار الشامل", "6022": "أرماح", "4003": "اكسترا", "4008": "ساكو", "4050": "ساسكو",
+        "4051": "باعظيم", "4180": "مجموعة فتيحي", "4190": "جرير", "4191": "أبو معطي", "4192": "السيف غاليري",
+        "4193": "نايس ون", "4194": "محطة البناء", "4200": "الدريس", "4240": "سينومي ريتيل",
+        "4001": "أسواق العثيم", "4006": "اسواق المزرعة", "4061": "انعام القابضة", "4160": "ثمار",
+        "4161": "بن داود", "4162": "المنجم", "4163": "الدواء", "4164": "النهدي", "2050": "مجموعة صافولا",
+        "2100": "وفرة", "2140": "ايان", "2270": "سدافكو", "2280": "المراعي", "2281": "تنمية",
+        "2282": "نقى", "2283": "المطاحن الأولى", "2284": "المطاحن الحديثة", "2285": "المطاحن العربية",
+        "2286": "المطاحن الرابعة", "2287": "انتاج", "2288": "نفوذ", "4080": "سناد القابضة",
+        "6001": "حلواني اخوان", "6010": "نادك", "6020": "جلكو", "6040": "تبوك الزراعية", "6050": "الأسماك",
+        "6060": "الشرقية سمنة", "6070": "الجوف", "6090": "جازادكو", "4165": "الماجد للعود", "2230": "الكيميائية",
+        "4002": "المواساة", "4004": "دله الصحية", "4005": "رعاية", "4007": "الحمادي", "4009": "السعودي الألماني الصحية",
+        "4013": "سليمان الحبيب", "4014": "دار المعدات", "4017": "فقيه الطبية", "4018": "الموسى",
+        "4019": "اس ام علي للرعاية الصحية", "4021": "المركز الكندي الطبي", "2070": "الدوائية",
+        "4015": "جمجوم فارما", "4016": "أفالون فارما", "1010": "الرياض", "1020": "الجزيرة", "1030": "الاستثمار",
+        "1050": "بي اس اف", "1060": "الأول", "1080": "العربي", "1120": "الراجحي", "1140": "البلاد",
+        "1150": "الإنماء", "1180": "الأهلي", "1111": "مجموعة تداول", "1182": "أملاك", "1183": "سهل",
+        "2120": "متطورة", "4081": "النايفات", "4082": "مرنة", "4083": "تسهيل", "4084": "دراية",
+        "4130": "درب السعودية", "4280": "المملكة", "7200": "ام أي اس", "7201": "بحر العرب", "7202": "سلوشنز",
+        "7203": "علم", "7204": "تويي", "7205": "دي بي اس", "7211": "عزم", "7010": "اس تي سي",
+        "7020": "اتحاد اتصالات", "7030": "زين السعودية", "7040": "قو للاتصالات", "2080": "الغاز القابضة",
+        "2081": "الخريف", "2082": "أكوا", "2083": "مرافق", "2084": "مباهنا", "5110": "السعودية للطاقة",
+        "4330": "الرياض ريت", "4331": "الجزيرة ريت", "4332": "جدوى ريت الحرمين", "4333": "تعليم ريت",
+        "4334": "المعذر ريت", "4335": "مشاركة ريت", "4337": "العزيزية ريت", "4338": "الأهلي ريت 1",
+        "4339": "دراية ريت", "4340": "الراجحي ريت", "4342": "جدوى ريت السعودية", "4344": "سدكو كابيتال ريت",
+        "4345": "الإنماء ريت للتجزئة"
+    }
 
 
-def safe_float(val, default=0.0):
-    try:
-        if val is None or str(val).lower() == 'nan':
-            return default
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-# =========================================================
-# الاستعلامات للماسح الأول (Top Gainers)
-# =========================================================
-def get_top_gainers_query(session):
-    exchange_filter = col("exchange").isin(VALID_EXCHANGES)
-
-    if session == "pre":
-        filters = [
-            col("premarket_close") >= MIN_PRICE,
-            col("premarket_close") <= MAX_PRICE,
-            col("premarket_change") > 0.0,
-            col("premarket_volume") >= MIN_VOL,
-            exchange_filter
-        ]
-        sort_col = "premarket_change"
-        extra = ["premarket_close", "premarket_change", "premarket_volume"]
-    elif session == "after":
-        filters = [
-            col("postmarket_close") >= MIN_PRICE,
-            col("postmarket_close") <= MAX_PRICE,
-            col("postmarket_change") > 0.0,
-            col("postmarket_volume") >= MIN_VOL,
-            exchange_filter
-        ]
-        sort_col = "postmarket_change"
-        extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
-    else:  # market
-        filters = [
-            col("close") >= MIN_PRICE,
-            col("close") <= MAX_PRICE,
-            col("change") > 0.0,
-            col("volume") >= MIN_VOL,
-            exchange_filter
-        ]
-        sort_col = "change"
-        extra = ["close", "change", "volume"]
-
-    tech_cols = [
-        "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
-        "sector", "VWAP", "change|240", "change|15",
-        "price_52_week_high", "price_52_week_low"
+def screens():
+    """الفلاتر الأصلية بدون تقييد استعلامات البحث"""
+    
+    # 1. بداية انطلاق (0.5% - 1.5%)
+    early_momentum = [
+        col("close") > 0,
+        col("change") >= 0.5,
+        col("change") <= 1.5,
+        col("volume") >= 150000,
+        col("close") > col("VWAP")
     ]
-    columns = list(dict.fromkeys(["name"] + extra + tech_cols))
 
+    # 2. اختراق لحظي وسيولة
+    intraday_breakout = [
+        col("close") > 0,
+        col("change") >= 0.8,
+        col("change") <= 3.0,
+        col("volume") >= 200000,
+        col("close") > col("VWAP"),
+        col("close") > col("EMA20")
+    ]
+
+    # 3. اختراق و CHOCH أسبوعي
+    swing_choch = [
+        col("close") > 0,
+        col("change") >= 1.0,
+        col("volume") >= 200000,
+        col("close") > col("EMA20"),
+        col("close") > col("high|1W")
+    ]
+
+    # 4. فلتر الانعكاس
+    reversal_signal = [
+        col("close") > 0,
+        col("volume") >= 100000,
+        col("RSI") <= 30,
+        col("SMA10") > col("SMA20"),
+        col("SMA10|1") <= col("SMA20|1")
+    ]
+
+    extra = ["close", "change", "volume"]
+    return extra, "change", {
+        "1️⃣ بداية انطلاق (0.5% - 1.5%)": early_momentum,
+        "2️⃣ اختراق لحظي وسيولة": intraday_breakout,
+        "3️⃣ اختراق و CHOCH أسبوعي": swing_choch,
+        "🔄 فلتر الانعكاس (SMA Cross + RSI <= 30)": reversal_signal
+    }
+
+
+def get_power_trend_age(row, tf, max_bars=10):
+    """حساب عدد الشموع المتتالية لاستمرار الـ Power Trend (شمعة خضراء وأعلى من EMA20)"""
+    count = 0
+    for i in range(max_bars):
+        suffix = f"|{tf}" if i == 0 else f"|{tf}|{i}"
+        c = float(row.get(f"close{suffix}", 0) or 0)
+        o = float(row.get(f"open{suffix}", 0) or 0)
+        ema = float(row.get(f"EMA20{suffix}", 0) or 0)
+        
+        if c > 0 and c > o and c > ema:
+            count += 1
+        else:
+            break
+    return count
+
+
+def run_screen(filters, columns, sort_col, tickers_dict):
+    symbols = [f"TADAWUL:{t}" for t in tickers_dict.keys()]
+    
     query = (
         Query()
-        .set_markets("america")
+        .set_tickers(*symbols)
         .select(*columns)
-        .where(col("type") == "stock", *filters)
+        .where(*filters)
         .order_by(sort_col, ascending=False)
-        .limit(SCAN_LIMIT)
+        .limit(300)
     )
-    return query, sort_col, extra
+    
+    try:
+        _, df = query.get_scanner_data()
+    except Exception as e:
+        print(f"خطأ في الاستعلام من TradingView: {e}")
+        df = None
+
+    if df is not None and not df.empty:
+        df["clean_name"] = df["name"].astype(str).str.replace("TADAWUL:", "").str.strip()
+        return df
+
+    return df
 
 
-# =========================================================
-# الاستعلام للماسح الثاني (Low Float Pre-Breakout)
-# =========================================================
-def get_low_float_prebreakout_query(session):
-    exchange_filter = col("exchange").isin(VALID_EXCHANGES)
-    price_c, chg_c, vol_c = DISPLAY[session]
-
-    filters = [
-        col(price_c) >= MIN_PRICE,
-        col(price_c) <= MAX_PRICE,
-        col(chg_c) >= PRE_MIN_CHANGE,
-        col(chg_c) <= PRE_MAX_CHANGE,
-        col("float_shares_outstanding") <= MAX_FLOAT,
-        col(vol_c) >= PRE_MIN_VOL,             # 40,000 سهم
-        exchange_filter
-    ]
-
-    tech_cols = [
-        "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
-        "sector", "VWAP", "change|1", "change|5", "volume|1", "float_shares_outstanding",
-        "price_52_week_high", "price_52_week_low"
-    ]
-    columns = list(dict.fromkeys(["name", price_c, chg_c, vol_c] + tech_cols))
-
-    query = (
-        Query()
-        .set_markets("america")
-        .select(*columns)
-        .where(col("type") == "stock", *filters)
-        .order_by(chg_c, ascending=False)
-        .limit(50)
-    )
-    return query
-
-
-def load_state():
-    today = datetime.now(NY).strftime("%Y-%m-%d")
+def load_seen():
+    today = datetime.now(RIYADH).strftime("%Y-%m-%d")
     try:
         with open(SEEN_FILE) as f:
             data = json.load(f)
         if data.get("date") == today:
-            return today, data.get("state", {})
+            counts = data.get("counts", {})
+            return today, counts
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     return today, {}
 
 
-def save_state(today, state):
-    try:
-        with open(SEEN_FILE, "w") as f:
-            json.dump({"date": today, "state": state}, f)
-    except Exception as e:
-        print(f"Error saving state: {e}")
+def save_seen(today, counts):
+    with open(SEEN_FILE, "w") as f:
+        json.dump({
+            "date": today,
+            "counts": counts
+        }, f, indent=2)
 
 
-def send_single_message(text):
-    if not text.strip():
+def send(text):
+    if not TOKEN or not CHAT_ID:
+        print("تحذير: BOT_TOKEN أو CHAT_ID غير موجود.")
         return
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     r = requests.post(
-        url,
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": text,
@@ -221,271 +198,164 @@ def send_single_message(text):
         },
         timeout=20,
     )
-    if not r.ok:
-        print(f"Telegram API Error: {r.status_code} - {r.text}")
     r.raise_for_status()
 
 
-def send_alerts_in_batches(header, alert_blocks):
-    current_message = header + "\n\n"
-    
-    for block in alert_blocks:
-        if len(current_message) + len(block) > 3000:
-            send_single_message(current_message)
-            current_message = header + " (تابع)\n\n" + block + "\n-----------------------------------\n"
-        else:
-            current_message += block + "\n-----------------------------------\n"
-            
-    if current_message.strip():
-        send_single_message(current_message)
-
-
-def calculate_levels(price, high, low, ema21, ema50):
+def calculate_levels(price, high, low, ema20, ema50):
     pivot = (high + low + price) / 3
+    
     r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
     r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
     r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
-    r_max = r3 * 1.08
-    r_possible = r3 * 1.15
+
+    support_intraday = min(low, ema20 if 0 < ema20 < price else low)
+    support_ilz = min(ema50 if 0 < ema50 < price else support_intraday * 0.98, pivot)
+
+    t1, t2, t3, t4 = r1, r2, r3, r3 * 1.03
+    t_max = t4 * 1.05
+
+    stop_1 = support_intraday * 0.985
+    stop_2 = support_ilz * 0.975
 
     return {
-        "t1": r1, "t2": r2, "t3": r3, "t_max": r_max, "t_possible": r_possible,
+        "support_intraday": support_intraday,
+        "t1": t1,
+        "t2": t2,
+        "t3": t3,
+        "t_max": t_max,
+        "stop_1": stop_1,
+        "stop_2": stop_2,
     }
 
 
-# =========================================================
-# تنفيذ الماسح الأول: Top Gainers & Momentum Spikes
-# =========================================================
-def check_top_gainers(session, today):
-    global GLOBAL_STATE
-    price_c, chg_c, vol_c = DISPLAY[session]
+def main():
+    today, counts = load_seen()
+    extra, sort_col, defs = screens()
+    stocks_dict = get_saudi_stocks_dict()
+    
+    # تحضير أعمدة الفريمات الزمنية لحساب عمر الشمعة (10 شموع سابقة لكل فريم)
+    tf_cols = []
+    for tf in ["240", "15"]:
+        for i in range(10):
+            suffix = f"|{tf}" if i == 0 else f"|{tf}|{i}"
+            tf_cols.extend([f"close{suffix}", f"open{suffix}", f"EMA20{suffix}"])
 
-    try:
-        query, _, _ = get_top_gainers_query(session)
-        _, df = query.get_scanner_data()
-    except Exception as e:
-        print(f"[{session}] [Top Gainers] Error fetching data: {e}")
-        return
+    tech_cols = [
+        "high", "low", "EMA20", "EMA50", "sector", "VWAP", 
+        "price_52_week_high", "price_52_week_low",
+        "high|1W", "high|2W", "RSI", "SMA10", "SMA20", "SMA10|1", "SMA20|1"
+    ] + tf_cols
 
-    if df is None or df.empty:
-        return
+    columns = list(dict.fromkeys(["name", "close", "volume"] + extra + tech_cols))
+    price_c, chg_c, vol_c = "close", "change", "volume"
+    had_error = False
 
-    state = GLOBAL_STATE
-    new_entries = []
-    spike_entries = []
-
-    for rank, (_, row) in enumerate(df.iterrows(), start=1):
-        ticker = str(row['name']).strip().upper()
-        change = safe_float(row[chg_c])
-        price = safe_float(row[price_c])
-        key = ticker
-
-        if key not in state:
-            count = 1
-            state[key] = {
-                "count": count,
-                "last_alert_change": change,
-                "min_change": change,
-                "last_session": session,
-                "price": price,
-                "rank": rank
-            }
-            new_entries.append((rank, row, "جديد في القائمة 🚨", count))
-        else:
-            item = state[key]
-            prev_count = item.get("count", 1)
-            last_alert_change = item.get("last_alert_change", change)
-            min_change = item.get("min_change", last_alert_change)
-            last_session = item.get("last_session", session)
-
-            diff_from_last = change - last_alert_change
-            diff_from_min = change - min_change
-
-            is_spike = (diff_from_last >= SPIKE_THRESHOLD) or (diff_from_min >= SPIKE_THRESHOLD)
-            is_session_change = (session != last_session)
-
-            if is_spike or is_session_change:
-                new_count = prev_count + 1
-                status_title = f"تسارع زخم مفاجئ (+{max(diff_from_last, diff_from_min):.1f}% 📈)" if is_spike else f"تجدد الزخم في {SESSION_AR[session]} 🚨"
-
-                state[key] = {
-                    "count": new_count,
-                    "last_alert_change": change,
-                    "min_change": change,
-                    "last_session": session,
-                    "price": price,
-                    "rank": rank
-                }
-                spike_entries.append((rank, row, status_title, new_count))
-            else:
-                item["min_change"] = min(min_change, change)
-                item["price"] = price
-                item["rank"] = rank
-                state[key] = item
-
-    GLOBAL_STATE = state
-    alerts = new_entries + spike_entries
-
-    if alerts:
-        header = f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}"
-        alert_blocks = []
-
-        for rank, row, status_title, count in alerts:
-            ticker = html.escape(str(row['name']).strip())
-            tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
-            
-            price = safe_float(row[price_c])
-            chg = safe_float(row[chg_c])
-            high = safe_float(row.get('high'), price * 1.02)
-            low = safe_float(row.get('low'), price * 0.98)
-            ema21 = safe_float(row.get('EMA21'), price * 0.99)
-            ema50 = safe_float(row.get('EMA50'), price * 0.97)
-            
-            sector_raw = str(row.get('sector', 'غير محدد'))
-            sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
-                
-            vwap_val = safe_float(row.get('VWAP'), price)
-            vol_val = safe_float(row.get(vol_c))
-
-            h52 = safe_float(row.get('price_52_week_high'), price)
-            l52 = safe_float(row.get('price_52_week_low'), price)
-            h52_diff = ((price - h52) / h52 * 100) if h52 > 0 else 0.0
-            l52_diff = ((price - l52) / l52 * 100) if l52 > 0 else 0.0
-
-            chg_4h = safe_float(row.get('change|240'), abs(chg))
-            chg_15m = safe_float(row.get('change|15'), abs(chg) / 3)
-            pt_4h_count = max(1, int(chg_4h / 2.0))
-            pt_4h_alert = " ( ⚠️اتجاه متقدم)" if pt_4h_count > 4 else ""
-            pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
-
-            lvl = calculate_levels(price, high, low, ema21, ema50)
-
-            block_lines = [
-                f"🔥 #{rank} <b>{ticker}</b> — {status_title} 🔴 <b>[تكرار {count}]</b>",
-                f"🏢 القطاع: <b>{sector}</b>",
-                f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
-                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
-                f"• Power Trend 4H: <b>{pt_4h_count} شمعة ⚡</b>{pt_4h_alert}",
-                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>",
-                f"• قمة 52 أسبوع: <b>${h52:.2f}</b> ({h52_diff:+.1f}%)",
-                f"• قاع 52 أسبوع: <b>${l52:.2f}</b> ({l52_diff:+.1f}%)",
-                f"🎯 احتمالية TP (${lvl['t1']:.2f}) (${lvl['t2']:.2f}) (${lvl['t3']:.2f}) (${lvl['t_max']:.2f}) ممكن(${lvl['t_possible']:.2f})",
-                f"📊 VWAP: <b>${vwap_val:.2f}</b>",
-                f"<i>(هذا تنبيه ليس توصيه المرجع في الدخول ماتراه على الشارت)</i>",
-                f"<i>(البوت يرسل أسهم ليست شرعيه انتبه مسؤليتك)</i>"
-            ]
-            alert_blocks.append("\n".join(block_lines))
-
-        send_alerts_in_batches(header, alert_blocks)
-
-
-# =========================================================
-# تنفيذ الماسح الثاني: Low Float Pre-Breakout Hunter
-# =========================================================
-def check_low_float_prebreakout(session, today):
-    price_c, chg_c, vol_c = DISPLAY[session]
-
-    try:
-        query = get_low_float_prebreakout_query(session)
-        _, df = query.get_scanner_data()
-    except Exception as e:
-        print(f"[{session}] [Low Float Scanner] Error fetching data: {e}")
-        return
-
-    if df is None or df.empty:
-        return
-
-    alert_blocks = []
-
-    for _, row in df.iterrows():
-        ticker = str(row['name']).strip().upper()
-        chg_1m = safe_float(row.get('change|1'))
-        chg_5m = safe_float(row.get('change|5'))
-
-        # تحقق شرط (1.5% أو أكثر في آخر دقيقة OR 1.5% أو أكثر في شمعة الـ 5 دقائق)
-        if chg_1m < SPIKE_MIN and chg_5m < SPIKE_MIN:
+    for label, filters in defs.items():
+        try:
+            df = run_screen(filters, columns, sort_col, stocks_dict)
+        except Exception as e:
+            print(f"[السوق السعودي/{label}] error: {e}")
+            had_error = True
             continue
 
-        vol_1m = safe_float(row.get('volume|1'), 0)
+        if df is None or df.empty:
+            print(f"[السوق السعودي/{label}] 0 matches")
+            continue
+
+        # تطبيق الفلترة السعرية الدقيقة
+        if label == "1️⃣ بداية انطلاق (0.5% - 1.5%)":
+            df = df[df["close"] >= df["high"] * 0.985]
+        elif label == "2️⃣ اختراق لحظي وسيولة":
+            df = df[df["close"] >= df["high"] * 0.99]
+
+        if df.empty:
+            print(f"[السوق السعودي/{label}] 0 matches after fine filter")
+            continue
+
+        results = []
+        for _, row in df.iterrows():
+            ticker_name = str(row.get('clean_name', row['name'])).strip()
+            results.append((ticker_name, row))
+
+        print(f"[السوق السعودي/{label}] {len(results)} matches")
+
+        lines = [f"🚨 <b>تحديث الزخم والأسهم | {label}</b>\n"]
         
-        # حفظ تاريخ حجم الدقيقة للحساب التراكمي
-        MINUTE_VOL_HISTORY[ticker].append(vol_1m)
-        if len(MINUTE_VOL_HISTORY[ticker]) > 10:
-            MINUTE_VOL_HISTORY[ticker].pop(0)
+        for idx, (ticker, row) in enumerate(results[:MAX_SHOWN], 1):
+            arabic_name = stocks_dict.get(ticker, ticker)
+            sector = str(row.get('sector', 'N/A')).strip()
+            
+            tv_url = f"https://www.tradingview.com/chart/?symbol=TADAWUL:{ticker}"
+            
+            price = float(row[price_c]) if row[price_c] else 0.0
+            change = float(row[chg_c]) if row[chg_c] else 0.0
+            volume = float(row[vol_c]) if row[vol_c] else 0.0
+            vwap = float(row.get('VWAP', 0.0) or 0.0)
+            rsi = float(row.get('RSI', 0.0) or 0.0)
+            
+            high = float(row['high']) if 'high' in row and row['high'] else price * 1.02
+            low = float(row['low']) if 'low' in row and row['low'] else price * 0.98
+            ema20 = float(row['EMA20']) if 'EMA20' in row and row['EMA20'] else price * 0.99
+            ema50 = float(row['EMA50']) if 'EMA50' in row and row['EMA50'] else price * 0.97
 
-        # حساب متوسط حجم تداول الدقيقة
-        history = MINUTE_VOL_HISTORY[ticker]
-        if len(history) >= 2:
-            avg_10m_vol = sum(history[:-1]) / len(history[:-1])
-        else:
-            avg_10d_vol = safe_float(row.get('average_volume_10d_calc'), 100_000)
-            avg_10m_vol = avg_10d_vol / 390.0
+            # حساب عمر شمعة Power Trend لفريم 4H وفريم 15M
+            age_4h = get_power_trend_age(row, "240")
+            age_15m = get_power_trend_age(row, "15")
 
-        # شرط الانفجار في الحجم (>= 4 أضعاف متوسط آخر 10 دقائق)
-        if avg_10m_vol > 0 and (vol_1m / avg_10m_vol) >= VOL_MULT_THRESHOLD:
-            vol_ratio = vol_1m / avg_10m_vol
-            price = safe_float(row[price_c])
-            chg = safe_float(row[chg_c])
-            float_shares = safe_float(row.get('float_shares_outstanding')) / 1_000_000
-            sector_raw = str(row.get('sector', 'غير محدد'))
-            sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
-            tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+            # بيانات أسبوعية واختبار CHOCH
+            high_1w = float(row.get('high|1W', 0.0) or 0.0)
+            high_2w = float(row.get('high|2W', 0.0) or 0.0)
+            has_weekly_choch = (high_1w > 0 and price > high_1w) or (high_2w > 0 and price > high_2w)
 
-            # توضيح الفريم الذي حدثت عليه القفزة
-            spike_info = []
-            if chg_1m >= SPIKE_MIN:
-                spike_info.append(f"دقيقة: +{chg_1m:.2f}%")
-            if chg_5m >= SPIKE_MIN:
-                spike_info.append(f"5 دقائق: +{chg_5m:.2f}%")
-            spike_str = " | ".join(spike_info)
+            # قمة وقاع 52 أسبوع وحساب النسب
+            high52 = float(row.get('price_52_week_high', 0.0) or 0.0)
+            low52 = float(row.get('price_52_week_low', 0.0) or 0.0)
+            
+            dist_high52 = ((price - high52) / high52 * 100) if high52 > 0 else 0.0
+            dist_low52 = ((price - low52) / low52 * 100) if low52 > 0 else 0.0
 
-            # قالب التنبيه المحدث للماسح الثاني
-            block_lines = [
-                f"💣 | <b>Low Float Spike</b> — <b>{ticker}</b>",
-                f"🏢 القطاع: <b>{sector}</b> | 🎈 الفلوت: <b>{float_shares:.2f}M سهم</b>",
-                f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b> (في القاع)",
-                f"⚡ <b>قفزة الزخم: {spike_str} 🚀</b>",
-                f"📊 <b>حجم الدقيقة: {vol_1m:,.0f} سهم ({vol_ratio:.1f}x ضعف المتوسط) 🔥</b>",
-                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>"
-            ]
-            alert_blocks.append("\n".join(block_lines))
+            # إدارة التنبيهات وزيادة العداد
+            curr_count = counts.get(ticker, 0) + 1
+            counts[ticker] = curr_count
 
-    if alert_blocks:
-        header = f"🎯 <b>سهم فلوت  منخفض (Low Float)</b> | {SESSION_AR[session]}"
-        send_alerts_in_batches(header, alert_blocks)
+            lvl = calculate_levels(price, high, low, ema20, ema50)
 
+            lines.append(f"🔥 <b>دخول جديد إلى القائمة – #{idx} {arabic_name} ({ticker})</b>")
+            lines.append(f"🚨 🛑 <b>[تنبيه {curr_count}]</b>")
+            
+            # عرض عمر شمعة Power Trend بالتنسيق المطلوب بالظبط
+            if age_4h > 0:
+                lines.append(f"⚡️ <b>شمعة {age_4h} : Power Trend 4H</b>")
+            if age_15m > 0:
+                lines.append(f"⚡️ <b>شمعة {age_15m} : Power Trend 15M</b>")
 
-def check_and_alert():
-    global GLOBAL_STATE, GLOBAL_DATE
+            if rsi > 0:
+                lines.append(f"📉 <b>RSI:</b> {rsi:.1f}")
+            if has_weekly_choch:
+                lines.append("⚡️ <b>[CHOCH أسبوعي إيجابي: كسر القمة الأسبوعية]</b>")
+                
+            lines.append(f"🏢 <b>القطاع:</b> {sector}")
+            lines.append(f"💵 <b>السعر:</b> {price:.2f} ر.س | <b>التغير:</b> +{change:.1f}% | Vol: {int(volume):,}")
+            if high52 > 0 and low52 > 0:
+                lines.append(f"🏔️ <b>قمة 52 أسبوع:</b> {high52:.2f} ر.س ({dist_high52:.1f}%)")
+                lines.append(f"⛰️ <b>قاع 52 أسبوع:</b> {low52:.2f} ر.س (+{dist_low52:.1f}%)")
+            lines.append(f"📈 <b>الشارت:</b> <a href='{tv_url}'>TradingView</a>")
+            lines.append(f"🎯 <b>الأهداف:</b> {lvl['t1']:.2f} ر.س -&gt; {lvl['t2']:.2f} ر.س -&gt; {lvl['t3']:.2f} ر.س")
+            lines.append(f"(أقصى هدف: {lvl['t_max']:.2f} ر.س)")
+            lines.append(f"🛡️ <b>الدعم:</b> {lvl['support_intraday']:.2f} ر.س | ⛔️ <b>الوقف:</b> {lvl['stop_1']:.2f} ر.س")
+            if vwap > 0:
+                lines.append(f"📊 <b>VWAP:</b> {vwap:.2f} ر.س")
+            lines.append("-----------------------------------\n")
 
-    session = current_session()
-    if not session:
-        print("Outside US sessions, skipping check.")
-        return
+        if len(results) > MAX_SHOWN:
+            lines.append(f"+{len(results) - MAX_SHOWN} أخرى\n")
+        lines.append("للفرز فقط، تأكد على الشارت قبل أي قرار.")
+        
+        send("\n".join(lines))
 
-    today = datetime.now(NY).strftime("%Y-%m-%d")
-
-    if GLOBAL_DATE != today:
-        GLOBAL_DATE = today
-        file_date, loaded_state = load_state()
-        GLOBAL_STATE = loaded_state if file_date == today else {}
-        MINUTE_VOL_HISTORY.clear()
-
-    # تشغيل الماسحين متتاليين
-    check_top_gainers(session, today)
-    check_low_float_prebreakout(session, today)
-
-    save_state(today, GLOBAL_STATE)
-
-
-def main():
-    print("Starting tracker (Top Gainers + Low Float Pre-Breakout Scanner)...")
-    while True:
-        try:
-            check_and_alert()
-        except Exception as e:
-            print(f"Error during check: {e}")
-        time.sleep(180)  # الفحص كل 3 دقائق
+    save_seen(today, counts)
+    if had_error:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
