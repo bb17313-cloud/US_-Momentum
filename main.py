@@ -4,10 +4,10 @@ Monitors:
 1. TradingView's Top Gainers (Pre-market, Market, After-hours).
 2. Low Float Pre-Breakout Stocks:
    - Float <= 20M
-   - Daily Change: +2% to +8%
-   - Total Volume >= 40,000
-   - Sudden Spike: 1-min >= 1.5% OR 5-min >= 1.5%
-   - 1-min Volume >= 4x (10-min average)
+   - Daily Change: +1.5% to +150%
+   - Total Volume >= 25,000
+   - Sudden Spike: 1-min >= 1.0% OR 5-min >= 1.0%
+   - 1-min Volume >= 2.5x (10-min average)
 Excludes OTC / Pink Sheets stocks completely.
 """
 
@@ -41,19 +41,19 @@ MINUTE_VOL_HISTORY = defaultdict(list)
 # ---------------------------------------------------------
 MIN_PRICE = 0.55                # السعر الأدنى: 0.55 دولار
 MAX_PRICE = 50.00               # السعر الأعلى: 50.00 دولار
-MIN_VOL = 70_000                # السيولة والحجم الأدنى للماسح الأول
+MIN_VOL = 50_000                # السيولة والحجم الأدنى للماسح الأول
 SCAN_LIMIT = 100                # البحث في قائمة أفضل 100 سهم
-SPIKE_THRESHOLD = 2.0          # تسارع الزخم: قفزة بـ 2% أو أكثر
+SPIKE_THRESHOLD = 2.0           # تسارع الزخم: قفزة بـ 2% أو أكثر
 
 # ---------------------------------------------------------
-# إعدادات الفلترة للماسح الثاني (Low Float Pre-Breakout)
+# إعدادات الفلترة للماسح الثاني (Low Float Early Breakout)
 # ---------------------------------------------------------
 MAX_FLOAT = 20_000_000          # أسهم الفلوت أقل من أو يساوي 20 مليون
-PRE_MIN_CHANGE = 2.0            # التغير اليومي الأدنى +2%
-PRE_MAX_CHANGE = 8.0            # التغير اليومي الأقصى +8%
-PRE_MIN_VOL = 40_000            # الحجم الإجمالي الأدنى للماسح الثاني (40 ألف سهم)
-SPIKE_MIN = 1.5                 # قفزة الزخم الأدنى: 1.5% (على شمعة الدقيقة أو 5 دقائق)
-VOL_MULT_THRESHOLD = 4.0        # حجم الدقيقة >= 4 أضعاف متوسط 10 دقائق
+PRE_MIN_CHANGE = 1.5            # التغير اليومي الأدنى +1.5% (لالتقاط البداية)
+PRE_MAX_CHANGE = 150.0          # رفع الحد الأقصى لالتقاط الأسهم حتى لو تفجرت (+100%+)
+PRE_MIN_VOL = 25_000            # الحجم الإجمالي الأدنى (25 ألف سهم لالتقاط الحركة مبكراً)
+SPIKE_MIN = 1.0                 # قفزة الزخم الأدنى: 1.0% (على شمعة الدقيقة أو 5 دقائق)
+VOL_MULT_THRESHOLD = 2.5        # حجم الدقيقة >= 2.5 ضعف متوسط 10 دقائق
 
 # البورصات الرسمية المسموح بها فقط
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -165,7 +165,7 @@ def get_low_float_prebreakout_query(session):
         col(chg_c) >= PRE_MIN_CHANGE,
         col(chg_c) <= PRE_MAX_CHANGE,
         col("float_shares_outstanding") <= MAX_FLOAT,
-        col(vol_c) >= PRE_MIN_VOL,             # 40,000 سهم
+        col(vol_c) >= PRE_MIN_VOL,
         exchange_filter
     ]
 
@@ -402,7 +402,7 @@ def check_low_float_prebreakout(session, today):
         chg_1m = safe_float(row.get('change|1'))
         chg_5m = safe_float(row.get('change|5'))
 
-        # تحقق شرط (1.5% أو أكثر في آخر دقيقة OR 1.5% أو أكثر في شمعة الـ 5 دقائق)
+        # تحقق شرط (1.0% أو أكثر في آخر دقيقة OR 1.0% أو أكثر في شمعة الـ 5 دقائق)
         if chg_1m < SPIKE_MIN and chg_5m < SPIKE_MIN:
             continue
 
@@ -421,7 +421,7 @@ def check_low_float_prebreakout(session, today):
             avg_10d_vol = safe_float(row.get('average_volume_10d_calc'), 100_000)
             avg_10m_vol = avg_10d_vol / 390.0
 
-        # شرط الانفجار في الحجم (>= 4 أضعاف متوسط آخر 10 دقائق)
+        # شرط الانفجار في الحجم (>= 2.5 ضعف متوسط آخر 10 دقائق)
         if avg_10m_vol > 0 and (vol_1m / avg_10m_vol) >= VOL_MULT_THRESHOLD:
             vol_ratio = vol_1m / avg_10m_vol
             price = safe_float(row[price_c])
@@ -443,7 +443,7 @@ def check_low_float_prebreakout(session, today):
             block_lines = [
                 f"💣 | <b>Low Float Spike</b> — <b>{ticker}</b>",
                 f"🏢 القطاع: <b>{sector}</b> | 🎈 الفلوت: <b>{float_shares:.2f}M سهم</b>",
-                f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b> (في القاع)",
+                f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b>",
                 f"⚡ <b>قفزة الزخم: {spike_str} 🚀</b>",
                 f"📊 <b>حجم الدقيقة: {vol_1m:,.0f} سهم ({vol_ratio:.1f}x ضعف المتوسط) 🔥</b>",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>"
@@ -451,7 +451,7 @@ def check_low_float_prebreakout(session, today):
             alert_blocks.append("\n".join(block_lines))
 
     if alert_blocks:
-        header = f"🎯 <b>سهم فلوت  منخفض (Low Float)</b> | {SESSION_AR[session]}"
+        header = f"🎯 <b>سهم فلوت منخفض (Low Float)</b> | {SESSION_AR[session]}"
         send_alerts_in_batches(header, alert_blocks)
 
 
@@ -485,7 +485,7 @@ def main():
             check_and_alert()
         except Exception as e:
             print(f"Error during check: {e}")
-        time.sleep(180)  # الفحص كل 3 دقائق
+        time.sleep(60)  # الفحص كل دقيقة (60 ثانية) بدلاً من 3 دقائق
 
 
 if __name__ == "__main__":
