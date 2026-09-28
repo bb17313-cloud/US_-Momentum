@@ -1,16 +1,3 @@
-"""US Top Gainers & Sudden Momentum Tracker + Low Float Pre-Breakout Scanner.
-
-Monitors:
-1. TradingView's Top Gainers (Pre-market, Market, After-hours).
-2. Low Float Pre-Breakout Stocks:
-   - Float <= 20M
-   - Daily Change: +1.5% to +150%
-   - Total Volume >= 25,000
-   - Sudden Spike: 1-min >= 1.0% OR 5-min >= 1.0%
-   - 1-min Volume >= 2.5x (10-min average)
-Excludes OTC / Pink Sheets stocks completely.
-"""
-
 import html
 import json
 import os
@@ -29,11 +16,9 @@ CHAT_ID = os.environ["CHAT_ID"]
 NY = ZoneInfo("America/New_York")
 SEEN_FILE = "seen.json"
 
-# ذاكرة عامة في الرام لضمان عدم استعادة الذاكرة الفارغة
 GLOBAL_STATE = {}
 GLOBAL_DATE = None
 
-# ذاكرة لحفظ حجوم التداول للدقائق الأخيرة للماسح الثاني (حساب متوسط 10 دقائق)
 MINUTE_VOL_HISTORY = defaultdict(list)
 
 # ---------------------------------------------------------
@@ -41,7 +26,7 @@ MINUTE_VOL_HISTORY = defaultdict(list)
 # ---------------------------------------------------------
 MIN_PRICE = 0.55                # السعر الأدنى: 0.55 دولار
 MAX_PRICE = 50.00               # السعر الأعلى: 50.00 دولار
-MIN_VOL = 50_000                # السيولة والحجم الأدنى للماسح الأول
+MIN_VOL = 50_000                # الحجم اليومي الكلي الأدنى
 SCAN_LIMIT = 100                # البحث في قائمة أفضل 100 سهم
 SPIKE_THRESHOLD = 2.0           # تسارع الزخم: قفزة بـ 2% أو أكثر
 
@@ -49,13 +34,12 @@ SPIKE_THRESHOLD = 2.0           # تسارع الزخم: قفزة بـ 2% أو �
 # إعدادات الفلترة للماسح الثاني (Low Float Early Breakout)
 # ---------------------------------------------------------
 MAX_FLOAT = 20_000_000          # أسهم الفلوت أقل من أو يساوي 20 مليون
-PRE_MIN_CHANGE = 1.5            # التغير اليومي الأدنى +1.5% (لالتقاط البداية)
-PRE_MAX_CHANGE = 150.0          # رفع الحد الأقصى لالتقاط الأسهم حتى لو تفجرت (+100%+)
-PRE_MIN_VOL = 25_000            # الحجم الإجمالي الأدنى (25 ألف سهم لالتقاط الحركة مبكراً)
-SPIKE_MIN = 1.0                 # قفزة الزخم الأدنى: 1.0% (على شمعة الدقيقة أو 5 دقائق)
+PRE_MIN_CHANGE = 1.5            # التغير اليومي الأدنى +1.5%
+PRE_MAX_CHANGE = 150.0          # الحد الأقصى للتغير
+PRE_MIN_VOL = 25_000            # الحجم الإجمالي الأدنى
+SPIKE_MIN = 1.0                 # قفزة الزخم الأدنى: 1.0%
 VOL_MULT_THRESHOLD = 2.5        # حجم الدقيقة >= 2.5 ضعف متوسط 10 دقائق
 
-# البورصات الرسمية المسموح بها فقط
 VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
 SESSION_AR = {
@@ -108,7 +92,8 @@ def get_top_gainers_query(session):
             col("premarket_close") >= MIN_PRICE,
             col("premarket_close") <= MAX_PRICE,
             col("premarket_change") > 0.0,
-            col("premarket_volume") >= MIN_VOL,
+            col("premarket_volume") >= 1_000,   # خفض حد حجم التداول اللحظي
+            col("volume") >= MIN_VOL,            # الاعتماد على الحجم الكلي لليوم
             exchange_filter
         ]
         sort_col = "premarket_change"
@@ -118,7 +103,8 @@ def get_top_gainers_query(session):
             col("postmarket_close") >= MIN_PRICE,
             col("postmarket_close") <= MAX_PRICE,
             col("postmarket_change") > 0.0,
-            col("postmarket_volume") >= MIN_VOL,
+            col("postmarket_volume") >= 1_000,  # خفض حد حجم الأفتر ماركت لتفادي النتايج الفارغة
+            col("volume") >= MIN_VOL,            # شرط الحجم الكلي لليوم 50 ألف
             exchange_filter
         ]
         sort_col = "postmarket_change"
@@ -159,13 +145,21 @@ def get_low_float_prebreakout_query(session):
     exchange_filter = col("exchange").isin(VALID_EXCHANGES)
     price_c, chg_c, vol_c = DISPLAY[session]
 
+    if session == "after":
+        vol_filter = col(vol_c) >= 500  # شرط مرن لحجم الأفتر ماركت
+    elif session == "pre":
+        vol_filter = col(vol_c) >= 1_000
+    else:
+        vol_filter = col(vol_c) >= PRE_MIN_VOL
+
     filters = [
         col(price_c) >= MIN_PRICE,
         col(price_c) <= MAX_PRICE,
         col(chg_c) >= PRE_MIN_CHANGE,
         col(chg_c) <= PRE_MAX_CHANGE,
         col("float_shares_outstanding") <= MAX_FLOAT,
-        col(vol_c) >= PRE_MIN_VOL,
+        col("volume") >= PRE_MIN_VOL,     # الحجم الكلي لليوم
+        vol_filter,
         exchange_filter
     ]
 
@@ -401,19 +395,24 @@ def check_low_float_prebreakout(session, today):
         ticker = str(row['name']).strip().upper()
         chg_1m = safe_float(row.get('change|1'))
         chg_5m = safe_float(row.get('change|5'))
+        chg_session = safe_float(row.get(chg_c))
 
-        # تحقق شرط (1.0% أو أكثر في آخر دقيقة OR 1.0% أو أكثر في شمعة الـ 5 دقائق)
-        if chg_1m < SPIKE_MIN and chg_5m < SPIKE_MIN:
-            continue
+        # معالجة استثناء الأفتر ماركت (تجاوز شرط الشمعات اللحظية إذا كانت NaN)
+        if session == "after":
+            if chg_1m < SPIKE_MIN and chg_5m < SPIKE_MIN and chg_session < PRE_MIN_CHANGE:
+                continue
+        else:
+            if chg_1m < SPIKE_MIN and chg_5m < SPIKE_MIN:
+                continue
 
         vol_1m = safe_float(row.get('volume|1'), 0)
+        session_vol = safe_float(row.get(vol_c), 0)
         
-        # حفظ تاريخ حجم الدقيقة للحساب التراكمي
-        MINUTE_VOL_HISTORY[ticker].append(vol_1m)
+        # الاعتماد على التراكم الحجمي للأفتر ماركت
+        MINUTE_VOL_HISTORY[ticker].append(vol_1m if vol_1m > 0 else session_vol)
         if len(MINUTE_VOL_HISTORY[ticker]) > 10:
             MINUTE_VOL_HISTORY[ticker].pop(0)
 
-        # حساب متوسط حجم تداول الدقيقة
         history = MINUTE_VOL_HISTORY[ticker]
         if len(history) >= 2:
             avg_10m_vol = sum(history[:-1]) / len(history[:-1])
@@ -421,9 +420,15 @@ def check_low_float_prebreakout(session, today):
             avg_10d_vol = safe_float(row.get('average_volume_10d_calc'), 100_000)
             avg_10m_vol = avg_10d_vol / 390.0
 
-        # شرط الانفجار في الحجم (>= 2.5 ضعف متوسط آخر 10 دقائق)
-        if avg_10m_vol > 0 and (vol_1m / avg_10m_vol) >= VOL_MULT_THRESHOLD:
-            vol_ratio = vol_1m / avg_10m_vol
+        # مرونة شرط تسارع الحجم للأفتر ماركت
+        is_vol_spike = False
+        if session == "after":
+            is_vol_spike = session_vol >= 1_000
+        else:
+            is_vol_spike = (avg_10m_vol > 0) and ((vol_1m / avg_10m_vol) >= VOL_MULT_THRESHOLD)
+
+        if is_vol_spike:
+            vol_ratio = (vol_1m / avg_10m_vol) if avg_10m_vol > 0 else 1.0
             price = safe_float(row[price_c])
             chg = safe_float(row[chg_c])
             float_shares = safe_float(row.get('float_shares_outstanding')) / 1_000_000
@@ -431,21 +436,22 @@ def check_low_float_prebreakout(session, today):
             sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
             tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
 
-            # توضيح الفريم الذي حدثت عليه القفزة
             spike_info = []
             if chg_1m >= SPIKE_MIN:
                 spike_info.append(f"دقيقة: +{chg_1m:.2f}%")
             if chg_5m >= SPIKE_MIN:
                 spike_info.append(f"5 دقائق: +{chg_5m:.2f}%")
+            if not spike_info:
+                spike_info.append(f"تغير الجلسة: +{chg:.1f}%")
+            
             spike_str = " | ".join(spike_info)
 
-            # قالب التنبيه المحدث للماسح الثاني
             block_lines = [
                 f"💣 | <b>Low Float Spike</b> — <b>{ticker}</b>",
                 f"🏢 القطاع: <b>{sector}</b> | 🎈 الفلوت: <b>{float_shares:.2f}M سهم</b>",
                 f"💵 السعر: <b>${price:.2f}</b> | التغير اليومي: <b>{chg:+.1f}%</b>",
                 f"⚡ <b>قفزة الزخم: {spike_str} 🚀</b>",
-                f"📊 <b>حجم الدقيقة: {vol_1m:,.0f} سهم ({vol_ratio:.1f}x ضعف المتوسط) 🔥</b>",
+                f"📊 <b>حجم الجلسة: {session_vol:,.0f} سهم 🔥</b>",
                 f"📈 الشارت: <a href='{tv_url}'>TradingView</a>"
             ]
             alert_blocks.append("\n".join(block_lines))
@@ -471,7 +477,6 @@ def check_and_alert():
         GLOBAL_STATE = loaded_state if file_date == today else {}
         MINUTE_VOL_HISTORY.clear()
 
-    # تشغيل الماسحين متتاليين
     check_top_gainers(session, today)
     check_low_float_prebreakout(session, today)
 
@@ -485,7 +490,7 @@ def main():
             check_and_alert()
         except Exception as e:
             print(f"Error during check: {e}")
-        time.sleep(60)  # الفحص كل دقيقة (60 ثانية) بدلاً من 3 دقائق
+        time.sleep(60)
 
 
 if __name__ == "__main__":
