@@ -1,444 +1,251 @@
-import html
-import json
 import os
-import sys
-import time
+import json
+import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import requests
-from tradingview_screener import Query, col
+# ================================
+# إعدادات التلغرام والبيئة
+# ================================
+TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
 
-TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
+RIYADH = ZoneInfo("Asia/Riyadh")
+SEEN_FILE = "seen_stocks.json"
+MAX_SHOWN = 20  # 👈 تم التعديل ليصبح 20 بدلاً من 10
 
-NY = ZoneInfo("America/New_York")
-SEEN_FILE = "seen.json"
-
-GLOBAL_STATE = {}
-GLOBAL_DATE = None
-
-# ---------------------------------------------------------
-# إعدادات الفلترة والشروط العامة للماسح الأول (Top Gainers)
-# ---------------------------------------------------------
-MIN_PRICE = 0.55                # السعر الأدنى: 0.55 دولار
-MAX_PRICE = 50.00               # السعر الأعلى: 50.00 دولار
-MIN_VOL = 50_000                # الحجم اليومي الكلي الأدنى
-SCAN_LIMIT = 100                # البحث في قائمة أفضل 100 سهم
-SPIKE_THRESHOLD = 2.0           # تسارع الزخم: قفزة بـ 2% أو أكثر
-
-# ---------------------------------------------------------
-# إعدادات الماسح الثاني (حجم > 15 ألف | تغير +- 4%)
-# ---------------------------------------------------------
-S2_MIN_VOL = 15_000             # الفوليوم الأدنى للجلسة: 15 ألف
-S2_CHANGE_THRESHOLD = 4.0       # نسبة التغير الأدنى للجلسة: +- 4%
-
-VALID_EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
-
-SESSION_AR = {
-    "pre": "قبل الافتتاح (Pre-Market)", 
-    "market": "الجلسة الرئيسية (Market)", 
-    "after": "بعد الإغلاق (After-Hours)"
-}
-
-DISPLAY = {
-    "pre": ("premarket_close", "premarket_change", "premarket_volume"),
-    "market": ("close", "change", "volume"),
-    "after": ("postmarket_close", "postmarket_change", "postmarket_volume"),
-}
-
-
-def current_session():
-    forced = os.environ.get("FORCE_SESSION", "").strip()
-    if forced in DISPLAY:
-        return forced
-    now = datetime.now(NY)
-    if now.weekday() >= 5:
-        return None
-    minutes = now.hour * 60 + now.minute
-    if 4 * 60 <= minutes < 9 * 60 + 30:
-        return "pre"
-    if 9 * 60 + 30 <= minutes < 16 * 60:
-        return "market"
-    if 16 * 60 <= minutes < 20 * 60:
-        return "after"
-    return None
-
-
-def safe_float(val, default=0.0):
+# ================================
+# إدارة ملف التكرارات والتحقق اليومي
+# ================================
+def load_seen():
+    today = datetime.now(RIYADH).strftime("%Y-%m-%d")
     try:
-        if val is None or str(val).lower() == 'nan':
-            return default
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-# =========================================================
-# الاستعلام للماسح الأول (Top Gainers)
-# =========================================================
-def get_top_gainers_query(session):
-    exchange_filter = col("exchange").isin(VALID_EXCHANGES)
-
-    if session == "pre":
-        filters = [
-            col("premarket_close") >= MIN_PRICE,
-            col("premarket_close") <= MAX_PRICE,
-            col("premarket_change") > 0.0,
-            col("premarket_volume") >= 1_000,
-            col("volume") >= MIN_VOL,
-            exchange_filter
-        ]
-        sort_col = "premarket_change"
-        extra = ["premarket_close", "premarket_change", "premarket_volume"]
-    elif session == "after":
-        filters = [
-            col("postmarket_close") >= MIN_PRICE,
-            col("postmarket_close") <= MAX_PRICE,
-            col("postmarket_change") > 0.0,
-            col("postmarket_volume") >= 1_000,
-            col("volume") >= MIN_VOL,
-            exchange_filter
-        ]
-        sort_col = "postmarket_change"
-        extra = ["postmarket_close", "postmarket_change", "postmarket_volume"]
-    else:  # market
-        filters = [
-            col("close") >= MIN_PRICE,
-            col("close") <= MAX_PRICE,
-            col("change") > 0.0,
-            col("volume") >= MIN_VOL,
-            exchange_filter
-        ]
-        sort_col = "change"
-        extra = ["close", "change", "volume"]
-
-    tech_cols = [
-        "high", "low", "EMA21", "EMA50", "average_volume_10d_calc", 
-        "sector", "VWAP", "change|240", "change|15",
-        "price_52_week_high", "price_52_week_low"
-    ]
-    columns = list(dict.fromkeys(["name"] + extra + tech_cols))
-
-    query = (
-        Query()
-        .set_markets("america")
-        .select(*columns)
-        .where(col("type") == "stock", *filters)
-        .order_by(sort_col, ascending=False)
-        .limit(SCAN_LIMIT)
-    )
-    return query, sort_col, extra
-
-
-# =========================================================
-# الاستعلام للماسح الثاني (Vol > 15k | Change +-4%)
-# =========================================================
-def get_second_scanner_query(session):
-    exchange_filter = col("exchange").isin(VALID_EXCHANGES)
-    price_c, chg_c, vol_c = DISPLAY[session]
-
-    filters = [
-        col(price_c) >= MIN_PRICE,
-        col(price_c) <= MAX_PRICE,
-        col(vol_c) >= S2_MIN_VOL,  # شرط Vol فوق 15 ألف
-        (col(chg_c) >= S2_CHANGE_THRESHOLD) | (col(chg_c) <= -S2_CHANGE_THRESHOLD),  # شرط التغير +- 4%
-        exchange_filter
-    ]
-
-    tech_cols = ["high", "low", "sector", "VWAP"]
-    columns = list(dict.fromkeys(["name", price_c, chg_c, vol_c] + tech_cols))
-
-    query = (
-        Query()
-        .set_markets("america")
-        .select(*columns)
-        .where(col("type") == "stock", *filters)
-        .order_by(vol_c, ascending=False)
-        .limit(50)
-    )
-    return query
-
-
-def load_state():
-    today = datetime.now(NY).strftime("%Y-%m-%d")
-    try:
-        with open(SEEN_FILE) as f:
-            data = json.load(f)
-        if data.get("date") == today:
-            return today, data.get("state", {})
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+        if os.path.exists(SEEN_FILE):
+            with open(SEEN_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today:
+                return today, data.get("counts", {})
+    except Exception as e:
+        print(f"⚠️ خطأ في قراءة ملف السجل: {e}")
     return today, {}
 
-
-def save_state(today, state):
+def save_seen(today, counts):
     try:
-        with open(SEEN_FILE, "w") as f:
-            json.dump({"date": today, "state": state}, f)
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "date": today,
+                "counts": counts,
+                "last_update": datetime.now(RIYADH).strftime("%H:%M:%S")
+            }, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"Error saving state: {e}")
+        print(f"❌ خطأ في حفظ ملف السجل: {e}")
 
+# ================================
+# تحديد نوع الجلسة
+# ================================
+def get_current_session():
+    now = datetime.now(RIYADH)
+    time_num = now.hour * 100 + now.minute
 
-def send_single_message(text):
-    if not text.strip():
-        return
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    r = requests.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
-        timeout=20,
-    )
-    if not r.ok:
-        print(f"Telegram API Error: {r.status_code} - {r.text}")
-    r.raise_for_status()
+    if 1100 <= time_num < 1630:
+        return "premarket", "🌅 Pre-Market (ما قبل الافتتاح)"
+    elif 1630 <= time_num < 2300:
+        return "market", "🔔 Main Session (السوق الرئيسي)"
+    elif time_num >= 2300 or time_num < 300:
+        return "postmarket", "🌙 Post-Market (ما بعد الإغلاق)"
+    else:
+        return "closed", "⏸️ المغلق (خارج أوقات التداول)"
 
-
-def send_alerts_in_batches(header, alert_blocks):
-    current_message = header + "\n\n"
-    
-    for block in alert_blocks:
-        if len(current_message) + len(block) > 3000:
-            send_single_message(current_message)
-            current_message = header + " (تابع)\n\n" + block + "\n-----------------------------------\n"
-        else:
-            current_message += block + "\n-----------------------------------\n"
-            
-    if current_message.strip():
-        send_single_message(current_message)
-
-
-def calculate_levels(price, high, low, ema21, ema50):
-    pivot = (high + low + price) / 3
-    r1 = (2 * pivot) - low if ((2 * pivot) - low) > price else price * 1.025
-    r2 = pivot + (high - low) if (pivot + (high - low)) > r1 else r1 * 1.03
-    r3 = high + 2 * (pivot - low) if (high + 2 * (pivot - low)) > r2 else r2 * 1.04
-    r_max = r3 * 1.08
-    r_possible = r3 * 1.15
-
-    return {
-        "t1": r1, "t2": r2, "t3": r3, "t_max": r_max, "t_possible": r_possible,
+# ================================
+# جلب بيانات الأسهم (TradingView API)
+# ================================
+def fetch_filtered_stocks(session_type):
+    url = "https://scanner.tradingview.com/america/scan"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/json"
     }
 
+    # تحديد أسماء الحقول بحسب الجلسة الحالية لضمان جلب السعر المباشر الصحيح
+    price_field = "close"
+    change_field = "change"
+    volume_field = "volume"
+    
+    if session_type == "premarket":
+        price_field = "premarket_close"
+        change_field = "premarket_change"
+        volume_field = "premarket_volume"
+    elif session_type == "postmarket":
+        price_field = "postmarket_close"
+        change_field = "postmarket_change"
+        volume_field = "postmarket_volume"
 
-# =========================================================
-# تنفيذ الماسح الأول: Top Gainers & Momentum Spikes
-# =========================================================
-def check_top_gainers(session, today):
-    global GLOBAL_STATE
-    price_c, chg_c, vol_c = DISPLAY[session]
+    # الفلاتر الأساسية لجميع الجلسات
+    filters = [
+        {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000}, # 👈 تم التعديل إلى أقل من 500M
+        {"left": volume_field, "operation": "greater", "right": 30_000},
+        {"left": change_field, "operation": "greater", "right": 2.0},
+        {"left": "average_volume_10d_calc", "operation": "greater", "right": 100_000},
+        {"left": "close", "operation": "less", "right": 50.0},
+        {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}
+    ]
+
+    # فلاتر إضافية خاصة بالسوق الرئيسي
+    if session_type == "market":
+        filters.append({"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.2})
+
+    payload = {
+        "filter": filters,
+        "options": {"lang": "en"},
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": [
+            "name",          # Index 0
+            "description",   # Index 1
+            price_field,     # Index 2: السعر المباشر للجلسة الحالية
+            change_field,    # Index 3: نسبة التغير للجلسة الحالية
+            volume_field,    # Index 4: الحجم للجلسة الحالية
+            "sector",        # Index 5
+            "industry",      # Index 6
+            "country",       # Index 7
+            "exchange",      # Index 8
+            "close"          # Index 9: سعر إغلاق السوق الرئيسي للتحوط
+        ],
+        "sort": {"sortBy": change_field, "sortOrder": "desc"},
+        "range": [0, MAX_SHOWN]
+    }
 
     try:
-        query, _, _ = get_top_gainers_query(session)
-        _, df = query.get_scanner_data()
+        response = requests.post(url, json=payload, headers=headers, timeout=12)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        print(f"📊 عدد الأسهم المسترجعة من API: {len(data)}")
+        return data
     except Exception as e:
-        print(f"[{session}] [Top Gainers] Error fetching data: {e}")
-        return
+        print(f"❌ خطأ أثناء جلب البيانات: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f" تفاصيل رد السيرفر: {e.response.text}")
+        return []
 
-    if df is None or df.empty:
-        return
+# ================================
+# أدوات المساعدة والإرسال
+# ================================
+def escape_html(text):
+    if not text:
+        return "غير محدد"
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    state = GLOBAL_STATE
-    new_entries = []
-    spike_entries = []
+def format_number(num):
+    if not num:
+        return "0"
+    if num >= 1_000_000:
+        return f"{num / 1_000_000:.2f}M"
+    elif num >= 1_000:
+        return f"{num / 1_000:.1f}K"
+    return f"{num:.2f}"
 
-    for rank, (_, row) in enumerate(df.iterrows(), start=1):
-        ticker = str(row['name']).strip().upper()
-        change = safe_float(row[chg_c])
-        price = safe_float(row[price_c])
-        key = ticker
+def send_telegram(text):
+    if not TOKEN or not CHAT_ID:
+        print("⚠️ BOT_TOKEN أو CHAT_ID غير محدد في متغيرات البيئة.")
+        return False
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=15,
+        )
+        res.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ خطأ في إرسال التليجرام: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f" تفاصيل رد تليجرام: {e.response.text}")
+        return False
 
-        if key not in state:
-            count = 1
-            state[key] = {
-                "count": count,
-                "last_alert_change": change,
-                "min_change": change,
-                "last_session": session,
-                "price": price,
-                "rank": rank
-            }
-            new_entries.append((rank, row, "جديد في القائمة 🚨", count))
+def send_in_chunks(header, blocks):
+    """تقسيم الرسالة إلى أجزاء لتفادي تجاوز حد تليجرام (4096 حرفاً)"""
+    current_message = header + "\n\n"
+    
+    for block in blocks:
+        if len(current_message) + len(block) + 2 > 3900:
+            send_telegram(current_message)
+            current_message = block + "\n\n"
         else:
-            item = state[key]
-            prev_count = item.get("count", 1)
-            last_alert_change = item.get("last_alert_change", change)
-            min_change = item.get("min_change", last_alert_change)
-            last_session = item.get("last_session", session)
-
-            diff_from_last = change - last_alert_change
-            diff_from_min = change - min_change
-
-            is_spike = (diff_from_last >= SPIKE_THRESHOLD) or (diff_from_min >= SPIKE_THRESHOLD)
-            is_session_change = (session != last_session)
-
-            if is_spike or is_session_change:
-                new_count = prev_count + 1
-                status_title = f"تسارع زخم مفاجئ (+{max(diff_from_last, diff_from_min):.1f}% 📈)" if is_spike else f"تجدد الزخم في {SESSION_AR[session]} 🚨"
-
-                state[key] = {
-                    "count": new_count,
-                    "last_alert_change": change,
-                    "min_change": change,
-                    "last_session": session,
-                    "price": price,
-                    "rank": rank
-                }
-                spike_entries.append((rank, row, status_title, new_count))
-            else:
-                item["min_change"] = min(min_change, change)
-                item["price"] = price
-                item["rank"] = rank
-                state[key] = item
-
-    GLOBAL_STATE = state
-    alerts = new_entries + spike_entries
-
-    if alerts:
-        header = f"🚨 <b>تحديث الزخم وTop Gainers</b> | {SESSION_AR[session]}"
-        alert_blocks = []
-
-        for rank, row, status_title, count in alerts:
-            ticker = html.escape(str(row['name']).strip())
-            tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+            current_message += block + "\n\n"
             
-            price = safe_float(row[price_c])
-            chg = safe_float(row[chg_c])
-            high = safe_float(row.get('high'), price * 1.02)
-            low = safe_float(row.get('low'), price * 0.98)
-            ema21 = safe_float(row.get('EMA21'), price * 0.99)
-            ema50 = safe_float(row.get('EMA50'), price * 0.97)
-            
-            sector_raw = str(row.get('sector', 'غير محدد'))
-            sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
-                
-            vwap_val = safe_float(row.get('VWAP'), price)
-            vol_val = safe_float(row.get(vol_c))
+    if current_message.strip():
+        send_telegram(current_message)
 
-            h52 = safe_float(row.get('price_52_week_high'), price)
-            l52 = safe_float(row.get('price_52_week_low'), price)
-            h52_diff = ((price - h52) / h52 * 100) if h52 > 0 else 0.0
-            l52_diff = ((price - l52) / l52 * 100) if l52 > 0 else 0.0
+# ================================
+# التنفيذ لمرة واحدة (Single Run)
+# ================================
+def main():
+    today, counts = load_seen()
+    now_str = datetime.now(RIYADH).strftime("%H:%M:%S")
+    session_key, session_name = get_current_session()
 
-            chg_4h = safe_float(row.get('change|240'), abs(chg))
-            chg_15m = safe_float(row.get('change|15'), abs(chg) / 3)
-            pt_4h_count = max(1, int(chg_4h / 2.0))
-            pt_4h_alert = " ( ⚠️اتجاه متقدم)" if pt_4h_count > 4 else ""
-            pt_15m_count = max(1, int(chg_15m / 0.8)) if chg_15m > 0 else 1
-
-            lvl = calculate_levels(price, high, low, ema21, ema50)
-
-            block_lines = [
-                f"🔥 #{rank} <b>{ticker}</b> — {status_title} 🔴 <b>[تكرار {count}]</b>",
-                f"🏢 القطاع: <b>{sector}</b>",
-                f"💵 السعر: <b>${price:.2f}</b> | التغير: <b>{chg:+.1f}%</b> | Vol: {vol_val:,.0f}",
-                f"📈 الشارت: <a href='{tv_url}'>TradingView</a>",
-                f"• Power Trend 4H: <b>{pt_4h_count} شمعة ⚡</b>{pt_4h_alert}",
-                f"• Power Trend 15M: <b>{pt_15m_count} شمعة ⚡</b>",
-                f"• قمة 52 أسبوع: <b>${h52:.2f}</b> ({h52_diff:+.1f}%)",
-                f"• قاع 52 أسبوع: <b>${l52:.2f}</b> ({l52_diff:+.1f}%)",
-                f"🎯 احتمالية TP (${lvl['t1']:.2f}) (${lvl['t2']:.2f}) (${lvl['t3']:.2f}) (${lvl['t_max']:.2f}) ممكن(${lvl['t_possible']:.2f})",
-                f"📊 VWAP: <b>${vwap_val:.2f}</b>",
-                f"<i>(هذا تنبيه ليس توصيه المرجع في الدخول ماتراه على الشارت)</i>",
-                f"<i>(البوت يرسل أسهم ليست شرعيه انتبه مسؤليتك)</i>"
-            ]
-            alert_blocks.append("\n".join(block_lines))
-
-        send_alerts_in_batches(header, alert_blocks)
-
-
-# =========================================================
-# تنفيذ الماسح الثاني: Vol > 15k & Change +- 4%
-# =========================================================
-def check_second_scanner(session, today):
-    global GLOBAL_STATE
-    price_c, chg_c, vol_c = DISPLAY[session]
-
-    try:
-        query = get_second_scanner_query(session)
-        _, df = query.get_scanner_data()
-    except Exception as e:
-        print(f"[{session}] [Scanner 2] Error fetching data: {e}")
+    if session_key == "closed":
+        print(f"⏸️ [{now_str}] السوق مغلق حالياً.")
         return
 
-    if df is None or df.empty:
-        return
+    print(f"⏰ [{now_str}] جاري الفحص | الجلسة: {session_name}")
+    stocks = fetch_filtered_stocks(session_key)
 
-    alert_blocks = []
-
-    for _, row in df.iterrows():
-        ticker = str(row['name']).strip().upper()
-        price = safe_float(row[price_c])
-        chg = safe_float(row[chg_c])
-        vol = safe_float(row[vol_c])
-
-        key = f"s2_{ticker}"
+    if stocks:
+        header = (
+            f"🇺🇸 <b>رادار الأسهم الأمريكية</b>\n"
+            f"⏱️ <b>الجلسة:</b> {session_name}\n"
+            f"📅 <b>الوقت:</b> <code>{now_str} KSA</code>\n"
+            f"-----------------------------------"
+        )
         
-        # تلافي تكرار التنبيه إلا في حال تغير السعر بنسبة إضافية (1.5%) أو تغيرت الجلسة
-        if key in GLOBAL_STATE:
-            last_chg = GLOBAL_STATE[key].get("last_change", chg)
-            last_sess = GLOBAL_STATE[key].get("session", session)
-            if abs(chg - last_chg) < 1.5 and last_sess == session:
+        blocks = []
+        for item in stocks:
+            d = item.get("d", [])
+            if len(d) < 9:
                 continue
 
-        GLOBAL_STATE[key] = {
-            "last_change": chg,
-            "session": session
-        }
+            symbol = escape_html(d[0])
+            # جلب سعر الجلسة الحالية، وإن لم يتوفر يُستخدم سعر الإغلاق d[9]
+            price_val = d[2] if d[2] is not None else d[9]
+            price = float(price_val or 0)
+            
+            change_pct = float(d[3] or 0)
+            volume = float(d[4] or 0)
+            sector = escape_html(d[5])
+            industry = escape_html(d[6])
+            country = escape_html(d[7])
+            exchange = escape_html(d[8])
 
-        sector_raw = str(row.get('sector', 'غير محدد'))
-        sector = "غير محدد" if sector_raw.lower() == 'nan' or not sector_raw else html.escape(sector_raw)
-        tv_url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+            curr_count = counts.get(symbol, 0) + 1
+            counts[symbol] = curr_count
 
-        block_lines = [
-            f"⚡ | <b>تنبيه حركة وزخم</b> — <b>{ticker}</b>",
-            f"🏢 القطاع: <b>{sector}</b>",
-            f"💵 السعر: <b>${price:.2f}</b> | التغير للجلسة: <b>{chg:+.2f}%</b>",
-            f"📊 <b>Vol: {vol:,.0f} سهم 🔥</b>",
-            f"📈 الشارت: <a href='{tv_url}'>TradingView</a>"
-        ]
-        alert_blocks.append("\n".join(block_lines))
+            alert_title = "🚨 Alert" if curr_count == 1 else f"🚨 Alert {curr_count}"
+            tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
 
-    if alert_blocks:
-        header = f"🚀 <b>تنبيه التغير والحجم (Vol > 15k | Change ±4%)</b> | {SESSION_AR[session]}"
-        send_alerts_in_batches(header, alert_blocks)
+            lines = [
+                f"{alert_title}",
+                f"<b>رمز السهم:</b> {symbol}",
+                f"<b>القطاع:</b> {sector}",
+                f"<b>الصناعة:</b> {industry}",
+                f"<b>الدوله:</b> {country}",
+                f"<b>السعر الحالي:</b> ${price:.2f}",
+                f"<b>التغير للجلسة الحالية +-٪:</b> {change_pct:+.2f}%",
+                f"<b>Vol:</b> {format_number(volume)}",
+                f"<b>الشارت TradingView:</b> <a href='{tv_url}'>فتح الشارت</a>",
+                "-----------------------------------"
+            ]
+            blocks.append("\n".join(lines))
 
-
-def check_and_alert():
-    global GLOBAL_STATE, GLOBAL_DATE
-
-    session = current_session()
-    if not session:
-        print("Outside US sessions, skipping check.")
-        return
-
-    today = datetime.now(NY).strftime("%Y-%m-%d")
-
-    if GLOBAL_DATE != today:
-        GLOBAL_DATE = today
-        file_date, loaded_state = load_state()
-        GLOBAL_STATE = loaded_state if file_date == today else {}
-
-    check_top_gainers(session, today)
-    check_second_scanner(session, today)
-
-    save_state(today, GLOBAL_STATE)
-
-
-def main():
-    print("Starting tracker (Top Gainers + Vol/Change Scanner)...")
-    while True:
-        try:
-            check_and_alert()
-        except Exception as e:
-            print(f"Error during check: {e}")
-        time.sleep(60)
-
+        save_seen(today, counts)
+        send_in_chunks(header, blocks)
+        print(f"✅ تم إرسال {len(blocks)} سهم بنجاح.")
+    else:
+        print(f"ℹ️️ [{now_str}] لا توجد أسهم تطابق الشروط حالياً.")
 
 if __name__ == "__main__":
     main()
