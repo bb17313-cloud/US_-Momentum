@@ -85,7 +85,7 @@ def fetch_filtered_stocks(session_type):
         {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000}, # 👈 تم التعديل إلى أقل من 500M
         {"left": volume_field, "operation": "greater", "right": 30_000},
         {"left": change_field, "operation": "greater", "right": 2.0},
-        {"left": "average_volume_10d_calc", "operation": "greater", "right": 100_000},
+        {"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000}, # 👈 تم التعديل إلى أكثر من 50K
         {"left": "close", "operation": "less", "right": 50.0},
         {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}
     ]
@@ -245,7 +245,7 @@ def main():
         send_in_chunks(header, blocks)
         print(f"✅ تم إرسال {len(blocks)} سهم بنجاح.")
     else:
-        print(f"ℹ️️ [{now_str}] لا توجد أسهم تطابق الشروط حالياً.")
+        print(f"ℹ [{now_str}] لا توجد أسهم تطابق الشروط حالياً.")
 
 if __name__ == "__main__":
     main()
