@@ -12,7 +12,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "")
 
 RIYADH = ZoneInfo("Asia/Riyadh")
 SEEN_FILE = "seen_stocks.json"
-MAX_SHOWN = 20  # 👈 تم التعديل ليصبح 20 بدلاً من 10
+MAX_SHOWN = 20
 
 # ================================
 # إدارة ملف التكرارات والتحقق اليومي
@@ -57,45 +57,108 @@ def get_current_session():
         return "closed", "⏸️ المغلق (خارج أوقات التداول)"
 
 # ================================
-# التحقق من التقسيم العكسي والورنتات
+# جلب بيانات التقسيم العكسي والورنتس بدقة عالية
 # ================================
 def check_reverse_split_schedule(symbol):
-    """فحص جدول التقسيم العكسي (SCHEDULE to splitting) للأسهم التي يقل سعرها عن 1 دولار"""
+    """
+    فحص جدول التقسيم العكسي المجدول عبر Nasdaq API و Nasdaq Calendar و SEC EDGAR
+    مع تضمين الترويسات (Origin & Referer) لتفادي حظر الطلبات (HTTP 403)
+    """
+    symbol = symbol.upper().strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/",
+    }
+
+    # 1. المصدر الأول: Nasdaq Quote Splits API
     try:
-        url = f"https://api.nasdaq.com/api/quote/{symbol.upper()}/splits?market=stocks"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*"
-        }
-        res = requests.get(url, headers=headers, timeout=5)
+        url = f"https://api.nasdaq.com/api/quote/{symbol}/splits?market=stocks"
+        res = requests.get(url, headers=headers, timeout=6)
         if res.status_code == 200:
             data = res.json().get("data", {})
-            if data and data.get("splitTable") and data["splitTable"].get("rows"):
-                rows = data["splitTable"]["rows"]
-                today_str = datetime.now(RIYADH).strftime("%Y-%m-%d")
-                for r in rows:
-                    exec_date = r.get("executionDate", "")
-                    ratio = r.get("ratio", "")
-                    if exec_date >= today_str:
-                        return f"مجدول ({ratio}) بتاريخ {exec_date}"
-                    elif ratio and ("1:" in ratio or "1/" in ratio):
-                        return f"آخر تقسيم عكسي: {ratio} ({exec_date})"
+            if data and isinstance(data, dict):
+                split_table = data.get("splitTable", {})
+                if split_table and "rows" in split_table and split_table["rows"]:
+                    rows = split_table["rows"]
+                    today_str = datetime.now(RIYADH).strftime("%Y-%m-%d")
+                    for r in rows:
+                        exec_date = r.get("executionDate", "")
+                        ratio = r.get("ratio", "")
+                        if exec_date >= today_str:
+                            return f"مجدول ({ratio}) بتاريخ {exec_date}"
+                        elif ratio and ("1:" in ratio or "1/" in ratio or ":" in ratio):
+                            return f"آخر تقسيم: {ratio} بتاريخ {exec_date}"
     except Exception as e:
-        print(f"⚠️ خطأ أثناء جلب التقسيم العكسي لـ {symbol}: {e}")
+        print(f"⚠️ خطأ Nasdaq Quote Splits لـ {symbol}: {e}")
+
+    # 2. المصدر الثاني: Nasdaq Splits Calendar API (للتقسيمات المجدولة مستقبلاً)
+    try:
+        cal_url = "https://api.nasdaq.com/api/calendar/splits"
+        res_cal = requests.get(cal_url, headers=headers, timeout=6)
+        if res_cal.status_code == 200:
+            cal_data = res_cal.json().get("data", {})
+            rows = cal_data.get("rows", []) if cal_data else []
+            for r in rows:
+                if r.get("symbol", "").upper() == symbol:
+                    ratio = r.get("ratio", "")
+                    exec_date = r.get("executionDate", "")
+                    return f"مجدول ({ratio}) بتاريخ {exec_date}"
+    except Exception as e:
+        print(f"⚠️ خطأ Nasdaq Calendar Splits لـ {symbol}: {e}")
+
+    # 3. المصدر الثالث: SEC EDGAR Filings (للإفصاحات الرسمية للشركات)
+    try:
+        sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
+        tickers_res = requests.get("https://www.sec.gov/files/company_tickers.json", headers=sec_headers, timeout=5)
+        if tickers_res.status_code == 200:
+            tickers_data = tickers_res.json()
+            cik = None
+            for idx, val in tickers_data.items():
+                if val.get("ticker", "").upper() == symbol:
+                    cik = str(val.get("cik_str")).zfill(10)
+                    break
+            if cik:
+                sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+                sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
+                if sub_res.status_code == 200:
+                    recent = sub_res.json().get("filings", {}).get("recent", {})
+                    forms = recent.get("form", [])
+                    doc_descs = recent.get("primaryDocDescription", [])
+                    filing_dates = recent.get("filingDate", [])
+                    for i in range(min(10, len(forms))):
+                        form = forms[i]
+                        desc = doc_descs[i] if i < len(doc_descs) else ""
+                        f_date = filing_dates[i] if i < len(filing_dates) else ""
+                        if form in ["8-K", "6-K"] and ("reverse split" in desc.lower() or "split" in desc.lower()):
+                            return f"مذكور بإفصاح رسمى ({form}) بتاريخ {f_date}"
+    except Exception as e:
+        print(f"⚠️ خطأ SEC EDGAR Splits لـ {symbol}: {e}")
+
     return "لا توجد جدولة معلنة"
 
 def check_warrants_and_issuances(symbol):
-    """فحص وجود ورنتس أو إصدارات قابلة للتنفيذ مع السعر"""
+    """
+    فحص وجود ورنتس متداولة أو إصدارات وطروحات قابلة للتنفيذ عبر TradingView و SEC EDGAR
+    """
+    symbol = symbol.upper().strip()
+    
+    # 1. البحث عن الورنتس في TradingView
     try:
         tv_url = "https://scanner.tradingview.com/america/scan"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Content-Type": "application/json"
         }
-        warrant_symbols = [f"{symbol}W", f"{symbol}.WS", f"{symbol}-WT", f"{symbol}WS"]
+        warrant_candidates = [
+            f"{symbol}W", f"{symbol}.WS", f"{symbol}-WT", f"{symbol}WS",
+            f"{symbol}.W", f"{symbol}/WS", f"{symbol}+"
+        ]
         payload = {
             "filter": [
-                {"left": "name", "operation": "in_range", "right": warrant_symbols}
+                {"left": "name", "operation": "in_range", "right": warrant_candidates}
             ],
             "columns": ["name", "close", "description"],
             "range": [0, 5]
@@ -104,21 +167,51 @@ def check_warrants_and_issuances(symbol):
         if res.status_code == 200:
             w_data = res.json().get("data", [])
             if w_data:
-                item = w_data[0].get("d", [])
-                w_name = item[0] if len(item) > 0 else f"{symbol}W"
-                w_price = item[1] if len(item) > 1 and item[1] is not None else 0.0
-                return f"متوفر ({w_name}) - بسعر: ${w_price:.2f}"
-
-        nasdaq_url = f"https://api.nasdaq.com/api/quote/{symbol.upper()}/summary?market=stocks"
-        headers_n = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json"}
-        res_n = requests.get(nasdaq_url, headers=headers_n, timeout=5)
-        if res_n.status_code == 200:
-            s_data = res_n.json().get("data", {})
-            if s_data and "warrant" in str(s_data).lower():
-                return "يوجد ورنتس / إصدارات معلنة"
+                found_warrants = []
+                for w in w_data:
+                    item = w.get("d", [])
+                    if item:
+                        w_name = item[0]
+                        w_price = item[1] if len(item) > 1 and item[1] is not None else 0.0
+                        found_warrants.append(f"{w_name} (${w_price:.2f})")
+                if found_warrants:
+                    return f"ورنتس متداولة: {', '.join(found_warrants)}"
     except Exception as e:
-        print(f"⚠️ خطأ أثناء جلب الورنتس لـ {symbol}: {e}")
-    return "لا توجد ورنتس/إصدارات معلنة"
+        print(f"⚠️️ خطأ فحص ورنتس TradingView لـ {symbol}: {e}")
+
+    # 2. فحص إفصاحات الطروحات والإصدارات في SEC EDGAR
+    try:
+        sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
+        tickers_res = requests.get("https://www.sec.gov/files/company_tickers.json", headers=sec_headers, timeout=5)
+        if tickers_res.status_code == 200:
+            tickers_data = tickers_res.json()
+            cik = None
+            for idx, val in tickers_data.items():
+                if val.get("ticker", "").upper() == symbol:
+                    cik = str(val.get("cik_str")).zfill(10)
+                    break
+            if cik:
+                sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+                sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
+                if sub_res.status_code == 200:
+                    recent = sub_res.json().get("filings", {}).get("recent", {})
+                    forms = recent.get("form", [])
+                    doc_descs = recent.get("primaryDocDescription", [])
+                    filing_dates = recent.get("filingDate", [])
+                    for i in range(min(12, len(forms))):
+                        form = forms[i]
+                        desc = doc_descs[i] if i < len(doc_descs) else ""
+                        f_date = filing_dates[i] if i < len(filing_dates) else ""
+                        if form in ["424B5", "S-1", "F-1", "S-3", "F-3"]:
+                            return f"طرح/إصدار معلن ({form} بتاريخ {f_date})"
+                        elif form in ["8-K", "6-K"]:
+                            desc_l = desc.lower()
+                            if "warrant" in desc_l or "offering" in desc_l:
+                                return f"إفصاح إصدار/ورنتس ({form} بتاريخ {f_date})"
+    except Exception as e:
+        print(f"⚠️ خطأ فحص SEC EDGAR لـ {symbol}: {e}")
+
+    return "لا توجد ورنتس/إصدارات معلنة مؤخراً"
 
 # ================================
 # جلب بيانات الأسهم (TradingView API)
@@ -130,7 +223,6 @@ def fetch_filtered_stocks(session_type):
         "Content-Type": "application/json"
     }
 
-    # تحديد أسماء الحقول بحسب الجلسة الحالية لضمان جلب السعر المباشر الصحيح
     price_field = "close"
     change_field = "change"
     volume_field = "volume"
@@ -144,17 +236,15 @@ def fetch_filtered_stocks(session_type):
         change_field = "postmarket_change"
         volume_field = "postmarket_volume"
 
-    # الفلاتر الأساسية لجميع الجلسات
     filters = [
-        {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000}, # 👈 تم التعديل إلى أقل من 500M
+        {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000},
         {"left": volume_field, "operation": "greater", "right": 30_000},
         {"left": change_field, "operation": "greater", "right": 2.0},
-        {"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000}, # 👈 تم التعديل إلى أكثر من 50K
+        {"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000},
         {"left": "close", "operation": "less", "right": 50.0},
         {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}
     ]
 
-    # فلاتر إضافية خاصة بالسوق الرئيسي
     if session_type == "market":
         filters.append({"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.2})
 
@@ -231,16 +321,13 @@ def send_telegram(text):
         return False
 
 def send_in_chunks(header, blocks):
-    """تقسيم الرسالة إلى أجزاء لتفادي تجاوز حد تليجرام (4096 حرفاً)"""
     current_message = header + "\n\n"
-    
     for block in blocks:
         if len(current_message) + len(block) + 2 > 3900:
             send_telegram(current_message)
             current_message = block + "\n\n"
         else:
             current_message += block + "\n\n"
-            
     if current_message.strip():
         send_telegram(current_message)
 
@@ -274,7 +361,6 @@ def main():
                 continue
 
             symbol = escape_html(d[0])
-            # جلب سعر الجلسة الحالية، وإن لم يتوفر يُستخدم سعر الإغلاق d[9]
             price_val = d[2] if d[2] is not None else d[9]
             price = float(price_val or 0)
             
@@ -302,12 +388,12 @@ def main():
                 f"<b>Vol:</b> {format_number(volume)}"
             ]
 
-            # إضافة فحص التقسيم العكسي فقط للأسهم التي يقل سعرها عن 1 دولار
+            # فحص التقسيم العكسي المجدول للأسهم التي يقل سعرها عن $1.0
             if price < 1.0:
                 split_sched = check_reverse_split_schedule(symbol)
                 lines.append(f"<b>SCHEDULE to splitting:</b> {split_sched}")
 
-            # إضافة فحص الورنتس والإصدارات القابلة للتنفيذ مع السعر
+            # فحص الورنتس والإصدارات المعلنة
             warrants_info = check_warrants_and_issuances(symbol)
             lines.append(f"<b>ورنتس / إصدارات قابلة للتنفيذ:</b> {warrants_info}")
 
