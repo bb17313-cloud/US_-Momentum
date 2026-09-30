@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -57,159 +58,174 @@ def get_current_session():
         return "closed", "⏸️ المغلق (خارج أوقات التداول)"
 
 # ================================
-# جلب بيانات التقسيم العكسي والورنتس بدقة عالية
+# تحليل وتعميق جلب بيانات SEC للتقسيم العكسي والورنتس/الإصدارات
 # ================================
-def check_reverse_split_schedule(symbol):
+def fetch_sec_filings_details(symbol, check_split=True):
     """
-    فحص جدول التقسيم العكسي المجدول عبر Nasdaq API و Nasdaq Calendar و SEC EDGAR
-    مع تضمين الترويسات (Origin & Referer) لتفادي حظر الطلبات (HTTP 403)
+    تحليل نصوص إفصاحات هيئة الأوراق المالية الأمريكية (SEC) لاستخراج:
+    1. جدولة التقسيم العكسي (النسبة + التاريخ بشكل دقيق - للأسهم < $1.0).
+    2. تفاصيل الطروحات والورنتس والإصدارات (الكمية + سعر التنفيذ/الطرح لجميع الأسهم).
     """
     symbol = symbol.upper().strip()
+    sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
+    
+    split_info = None
+    offering_info = None
+
+    try:
+        # 1. الحصول على CIK للسهم
+        tickers_res = requests.get("https://www.sec.gov/files/company_tickers.json", headers=sec_headers, timeout=5)
+        if tickers_res.status_code != 200:
+            return split_info, offering_info
+
+        tickers_data = tickers_res.json()
+        cik = None
+        cik_raw = None
+        for idx, val in tickers_data.items():
+            if val.get("ticker", "").upper() == symbol:
+                cik = str(val.get("cik_str")).zfill(10)
+                cik_raw = str(val.get("cik_str"))
+                break
+
+        if not cik:
+            return split_info, offering_info
+
+        # 2. جلب قائمة الإفصاحات الحديثة
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
+        if sub_res.status_code != 200:
+            return split_info, offering_info
+
+        recent = sub_res.json().get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        accession_numbers = recent.get("accessionNumber", [])
+        primary_docs = recent.get("primaryDocument", [])
+        filing_dates = recent.get("filingDate", [])
+        doc_descs = recent.get("primaryDocDescription", [])
+
+        # فحص آخر 15 إفصاحاً للشركة
+        for i in range(min(15, len(forms))):
+            form = forms[i]
+            acc_num = accession_numbers[i]
+            acc_clean = acc_num.replace("-", "")
+            p_doc = primary_docs[i]
+            f_date = filing_dates[i]
+            desc = doc_descs[i] if i < len(doc_descs) else ""
+
+            # أ) البحث عن التقسيم العكسي المجدول (فقط عند استدعائه للأسهم < 1.0$)
+            if check_split and not split_info and form in ["6-K", "8-K", "DEF 14A", "424B5"]:
+                if "split" in desc.lower() or "consolidation" in desc.lower() or form in ["6-K", "8-K"]:
+                    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
+                    try:
+                        doc_res = requests.get(doc_url, headers=sec_headers, timeout=5)
+                        if doc_res.status_code == 200:
+                            text_clean = re.sub('<[^<]+?>', ' ', doc_res.text)
+                            
+                            # استخراج نسبة التقسيم العكسي (مثال: 1-for-10, 1:10)
+                            ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
+                            # استخراج تاريخ التنفيذ
+                            date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
+
+                            if ratio_match:
+                                r_val = ratio_match.group(1) or ratio_match.group(2)
+                                ratio_str = f"1:{r_val}"
+                                d_str = date_match.group(1) if date_match else f_date
+                                split_info = f"مجدول ({ratio_str}) بتاريخ {d_str} (إفصاح {form})"
+                            elif "reverse split" in text_clean.lower():
+                                split_info = f"معلن بإفصاح {form} بتاريخ {f_date}"
+                    except Exception:
+                        pass
+
+            # ب) البحث عن الورنتس/الإصدارات واستخراج السعر والكمية لجميع الأسهم (424B5, S-1, F-1, S-3, F-3, 8-K, 6-K)
+            if not offering_info and form in ["424B5", "S-1", "F-1", "S-3", "F-3", "8-K", "6-K"]:
+                if form in ["424B5", "S-1", "F-1"] or "warrant" in desc.lower() or "offering" in desc.lower() or "issuance" in desc.lower():
+                    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
+                    try:
+                        doc_res = requests.get(doc_url, headers=sec_headers, timeout=5)
+                        if doc_res.status_code == 200:
+                            text_clean = re.sub('<[^<]+?>', ' ', doc_res.text)
+
+                            # استخراج سعر التنفيذ / سعر الطرح (Exercise Price / Offering Price)
+                            ex_price_match = re.search(r'(?:exercise\s+price|offering\s+price|purchase\s+price)\s+(?:of|is|equal\s+to)?\s*\$?\s*([0-9]+\.?[0-9]*)|\$([0-9]+\.?[0-9]*)\s+per\s+(?:warrant|share)', text_clean, re.IGNORECASE)
+                            
+                            # استخراج الكمية (Quantity)
+                            qty_match = re.search(r'(?:up\s+to\s+)?([0-9,]+)\s*(?:warrants|shares|common\s+shares|units)', text_clean, re.IGNORECASE)
+
+                            ex_p = f"${ex_price_match.group(1) or ex_price_match.group(2)}" if ex_price_match else "غير محدد"
+                            qty = f"{qty_match.group(1)}" if qty_match else "غير محددة"
+
+                            offering_info = f"طرح/إصدار {form} ({f_date}) | الكمية: {qty} | سعر التنفيذ: {ex_p}"
+                    except Exception:
+                        pass
+
+    except Exception as e:
+        print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
+
+    return split_info, offering_info
+
+# ================================
+# الدوال الرئيسية مع المصادر البديلة
+# ================================
+def check_reverse_split_schedule(symbol):
+    """فحص التقسيم العكسي (مفعل فقط للأسهم أقل من 1.0$)"""
+    symbol = symbol.upper().strip()
+
+    # 1. البحث في إفصاحات SEC المباشرة لقراءة النسبة والتاريخ بدقة
+    sec_split, _ = fetch_sec_filings_details(symbol, check_split=True)
+    if sec_split:
+        return sec_split
+
+    # 2. البحث في تقويم Nasdaq
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
         "Origin": "https://www.nasdaq.com",
         "Referer": "https://www.nasdaq.com/",
     }
-
-    # 1. المصدر الأول: Nasdaq Quote Splits API
-    try:
-        url = f"https://api.nasdaq.com/api/quote/{symbol}/splits?market=stocks"
-        res = requests.get(url, headers=headers, timeout=6)
-        if res.status_code == 200:
-            data = res.json().get("data", {})
-            if data and isinstance(data, dict):
-                split_table = data.get("splitTable", {})
-                if split_table and "rows" in split_table and split_table["rows"]:
-                    rows = split_table["rows"]
-                    today_str = datetime.now(RIYADH).strftime("%Y-%m-%d")
-                    for r in rows:
-                        exec_date = r.get("executionDate", "")
-                        ratio = r.get("ratio", "")
-                        if exec_date >= today_str:
-                            return f"مجدول ({ratio}) بتاريخ {exec_date}"
-                        elif ratio and ("1:" in ratio or "1/" in ratio or ":" in ratio):
-                            return f"آخر تقسيم: {ratio} بتاريخ {exec_date}"
-    except Exception as e:
-        print(f"⚠️ خطأ Nasdaq Quote Splits لـ {symbol}: {e}")
-
-    # 2. المصدر الثاني: Nasdaq Splits Calendar API (للتقسيمات المجدولة مستقبلاً)
     try:
         cal_url = "https://api.nasdaq.com/api/calendar/splits"
-        res_cal = requests.get(cal_url, headers=headers, timeout=6)
+        res_cal = requests.get(cal_url, headers=headers, timeout=5)
         if res_cal.status_code == 200:
-            cal_data = res_cal.json().get("data", {})
-            rows = cal_data.get("rows", []) if cal_data else []
+            rows = res_cal.json().get("data", {}).get("rows", []) or []
             for r in rows:
                 if r.get("symbol", "").upper() == symbol:
                     ratio = r.get("ratio", "")
                     exec_date = r.get("executionDate", "")
                     return f"مجدول ({ratio}) بتاريخ {exec_date}"
     except Exception as e:
-        print(f"⚠️ خطأ Nasdaq Calendar Splits لـ {symbol}: {e}")
-
-    # 3. المصدر الثالث: SEC EDGAR Filings (للإفصاحات الرسمية للشركات)
-    try:
-        sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
-        tickers_res = requests.get("https://www.sec.gov/files/company_tickers.json", headers=sec_headers, timeout=5)
-        if tickers_res.status_code == 200:
-            tickers_data = tickers_res.json()
-            cik = None
-            for idx, val in tickers_data.items():
-                if val.get("ticker", "").upper() == symbol:
-                    cik = str(val.get("cik_str")).zfill(10)
-                    break
-            if cik:
-                sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-                sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
-                if sub_res.status_code == 200:
-                    recent = sub_res.json().get("filings", {}).get("recent", {})
-                    forms = recent.get("form", [])
-                    doc_descs = recent.get("primaryDocDescription", [])
-                    filing_dates = recent.get("filingDate", [])
-                    for i in range(min(10, len(forms))):
-                        form = forms[i]
-                        desc = doc_descs[i] if i < len(doc_descs) else ""
-                        f_date = filing_dates[i] if i < len(filing_dates) else ""
-                        if form in ["8-K", "6-K"] and ("reverse split" in desc.lower() or "split" in desc.lower()):
-                            return f"مذكور بإفصاح رسمى ({form}) بتاريخ {f_date}"
-    except Exception as e:
-        print(f"⚠️ خطأ SEC EDGAR Splits لـ {symbol}: {e}")
+        print(f"⚠️ خطأ Nasdaq Split Calendar لـ {symbol}: {e}")
 
     return "لا توجد جدولة معلنة"
 
 def check_warrants_and_issuances(symbol):
-    """
-    فحص وجود ورنتس متداولة أو إصدارات وطروحات قابلة للتنفيذ عبر TradingView و SEC EDGAR
-    """
+    """فحص الورنتس والإصدارات والكمية وسعر التنفيذ لجميع الأسهم المرسلة"""
     symbol = symbol.upper().strip()
-    
-    # 1. البحث عن الورنتس في TradingView
+
+    # 1. البحث في SEC EDGAR لاستخراج الكمية وسعر التنفيذ من وثيقة الطرح/الإصدار الرسمية
+    _, sec_offering = fetch_sec_filings_details(symbol, check_split=False)
+    if sec_offering:
+        return sec_offering
+
+    # 2. البحث عن الورنتس المباشرة المسجلة في TradingView
     try:
         tv_url = "https://scanner.tradingview.com/america/scan"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Content-Type": "application/json"
-        }
-        warrant_candidates = [
-            f"{symbol}W", f"{symbol}.WS", f"{symbol}-WT", f"{symbol}WS",
-            f"{symbol}.W", f"{symbol}/WS", f"{symbol}+"
-        ]
+        headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+        warrant_candidates = [f"{symbol}W", f"{symbol}.WS", f"{symbol}-WT", f"{symbol}WS", f"{symbol}.W"]
         payload = {
-            "filter": [
-                {"left": "name", "operation": "in_range", "right": warrant_candidates}
-            ],
-            "columns": ["name", "close", "description"],
+            "filter": [{"left": "name", "operation": "in_range", "right": warrant_candidates}],
+            "columns": ["name", "close"],
             "range": [0, 5]
         }
         res = requests.post(tv_url, json=payload, headers=headers, timeout=5)
         if res.status_code == 200:
             w_data = res.json().get("data", [])
             if w_data:
-                found_warrants = []
-                for w in w_data:
-                    item = w.get("d", [])
-                    if item:
-                        w_name = item[0]
-                        w_price = item[1] if len(item) > 1 and item[1] is not None else 0.0
-                        found_warrants.append(f"{w_name} (${w_price:.2f})")
-                if found_warrants:
-                    return f"ورنتس متداولة: {', '.join(found_warrants)}"
+                w_item = w_data[0].get("d", [])
+                w_name = w_item[0]
+                w_price = w_item[1] if len(w_item) > 1 and w_item[1] is not None else 0.0
+                return f"ورنتس متداولة بالسوق ({w_name}) | سعر الورنت الحالي: ${w_price:.2f}"
     except Exception as e:
-        print(f"⚠️️ خطأ فحص ورنتس TradingView لـ {symbol}: {e}")
-
-    # 2. فحص إفصاحات الطروحات والإصدارات في SEC EDGAR
-    try:
-        sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
-        tickers_res = requests.get("https://www.sec.gov/files/company_tickers.json", headers=sec_headers, timeout=5)
-        if tickers_res.status_code == 200:
-            tickers_data = tickers_res.json()
-            cik = None
-            for idx, val in tickers_data.items():
-                if val.get("ticker", "").upper() == symbol:
-                    cik = str(val.get("cik_str")).zfill(10)
-                    break
-            if cik:
-                sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-                sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
-                if sub_res.status_code == 200:
-                    recent = sub_res.json().get("filings", {}).get("recent", {})
-                    forms = recent.get("form", [])
-                    doc_descs = recent.get("primaryDocDescription", [])
-                    filing_dates = recent.get("filingDate", [])
-                    for i in range(min(12, len(forms))):
-                        form = forms[i]
-                        desc = doc_descs[i] if i < len(doc_descs) else ""
-                        f_date = filing_dates[i] if i < len(filing_dates) else ""
-                        if form in ["424B5", "S-1", "F-1", "S-3", "F-3"]:
-                            return f"طرح/إصدار معلن ({form} بتاريخ {f_date})"
-                        elif form in ["8-K", "6-K"]:
-                            desc_l = desc.lower()
-                            if "warrant" in desc_l or "offering" in desc_l:
-                                return f"إفصاح إصدار/ورنتس ({form} بتاريخ {f_date})"
-    except Exception as e:
-        print(f"⚠️ خطأ فحص SEC EDGAR لـ {symbol}: {e}")
+        print(f"⚠️ خطأ TradingView Warrants لـ {symbol}: {e}")
 
     return "لا توجد ورنتس/إصدارات معلنة مؤخراً"
 
@@ -388,12 +404,12 @@ def main():
                 f"<b>Vol:</b> {format_number(volume)}"
             ]
 
-            # فحص التقسيم العكسي المجدول للأسهم التي يقل سعرها عن $1.0
+            # 1. التقسيم العكسي: يظهر فقط وبشكل حصري للأسهم التي يقل سعرها عن 1.0$ (price < 1.0)
             if price < 1.0:
                 split_sched = check_reverse_split_schedule(symbol)
                 lines.append(f"<b>SCHEDULE to splitting:</b> {split_sched}")
 
-            # فحص الورنتس والإصدارات المعلنة
+            # 2. الورنتس والإصدارات والكمية وسعر التنفيذ: تُفحص وتُعرض لكل الأسهم المرسلة بلا استثناء
             warrants_info = check_warrants_and_issuances(symbol)
             lines.append(f"<b>ورنتس / إصدارات قابلة للتنفيذ:</b> {warrants_info}")
 
