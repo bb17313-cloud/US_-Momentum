@@ -58,6 +58,79 @@ def get_current_session():
         return "closed", "⏸️ المغلق (خارج أوقات التداول)"
 
 # ================================
+# دالة تلخيص وتحليل مضمون نماذج SEC
+# ================================
+def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
+    f_upper = f_form.upper()
+    desc_lower = doc_desc.lower()
+    item_str = str(item_val)
+    text_clean = re.sub('<[^<]+?>', ' ', doc_text) if doc_text else ""
+
+    # 1. تحليل نماذج النشرات والطرح 424B / S-1 / F-1 / S-3 (استخراج الأرقام بدقة)
+    if f_upper.startswith("424B") or any(f_upper.startswith(p) for p in ["S-1", "F-1", "S-3", "F-3"]):
+        if text_clean:
+            resale_match = re.search(r'(?:resale\s+of\s+up\s+to|resale\s+of)\s+([0-9,]+)\s+shares(?:\s+of\s+class\s+a|\s+of\s+common\s+stock)?', text_clean, re.IGNORECASE)
+            offering_match = re.search(r'(?:offering\s+of\s+up\s+to|offering\s+of)\s+([0-9,]+)\s+shares', text_clean, re.IGNORECASE)
+            
+            if resale_match:
+                class_a = " (Class A)" if "class a" in text_clean.lower() else ""
+                return f"إعادة بيع حتى {resale_match.group(1)} سهم من العادية{class_a}"
+            elif offering_match:
+                return f"طرح/إصدار حتى {offering_match.group(1)} سهم عادي"
+
+        if "resale" in desc_lower or "selling stockholder" in desc_lower:
+            return "إعادة بيع أسهم مملوكة لمساهمين"
+        elif "warrant" in desc_lower:
+            return "نشرة طرح/إصدار أسهم وورنتس"
+        return "نشرة طرح/إصدار أسهم عادية"
+
+    # 2. نموذج 8-K للأحداث الجوهرية
+    if f_upper == "8-K":
+        if "1.01" in item_str or "material definitive agreement" in desc_lower:
+            return "اتفاقية جوهرية جديدة"
+        elif "2.02" in item_str or "results of operations" in desc_lower or "earnings" in desc_lower:
+            return "إعلان نتائج مالية وأرباح"
+        elif "3.01" in item_str or "delisting" in desc_lower:
+            return "إشعار شروط الإدراج والامتثال"
+        elif "5.02" in item_str or "director" in desc_lower:
+            return "تغييرات بالإدارة ومجلس الإدارة"
+        elif "7.01" in item_str or "regulation fd" in desc_lower:
+            return "إفصاح تنظيم الإفصاح العادل (FD)"
+        elif "8.01" in item_str or "other events" in desc_lower:
+            return "أحداث ومعلومات جوهرية أخرى"
+        return "إفصاح عن أحداث جوهرية"
+
+    # 3. نموذج 6-K للشركات الأجنبية
+    if f_upper == "6-K":
+        if "fda" in desc_lower:
+            return "تطورات وموافقات FDA"
+        elif "split" in desc_lower:
+            return "إفصاح تقسيم أسهم"
+        elif "financial" in desc_lower or "earnings" in desc_lower:
+            return "نتائج وتقارير مالية"
+        return "تقرير جوهري لشركة أجنبية"
+
+    # 4. ملكية كبار المساهمين والمطلعين
+    if "13G" in f_upper or "13D" in f_upper:
+        return "إفصاح ملكية كبار المساهمين (>5%)"
+    if f_upper == "4":
+        return "تغييرات ملكية المطلعين"
+    if f_upper == "425":
+        return "بيانات متعلقة بصفقة اندماج/استحواذ"
+    if "14A" in f_upper:
+        return "توكيل تصويت اجتماعات المساهمين"
+    if f_upper in ["10-K", "20-F"]:
+        return "التقرير المالي السنوي"
+    if f_upper == "10-Q":
+        return "التقرير المالي الربع سنوي"
+
+    if doc_desc:
+        clean_desc = doc_desc[:30].strip()
+        return f"{clean_desc}"
+
+    return "إفصاح رسمى"
+
+# ================================
 # تحليل وتعميق جلب بيانات SEC للتقسيم العكسي، الورنتس، الإفصاحات، والمحفزات
 # ================================
 def fetch_sec_filings_and_catalysts(symbol, check_split=True):
@@ -65,7 +138,7 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
     تحليل نصوص وإفصاحات SEC + أخبار المحفزات الإيجابية (Forward Catalysts):
     1. التقسيم العكسي (للأسهم < $1.0).
     2. الورنتس والإصدارات القابلة للتنفيذ (الكمية + سعر التنفيذ).
-    3. أحدث إفصاحات SEC الرسمية.
+    3. أحدث إفصاحات SEC الرسمية بتلخيص مدمج ودقيق.
     4. أخبار المحفزات الإيجابية (Forward Catalysts) من SEC وأخبار Yahoo RSS.
     """
     symbol = symbol.upper().strip()
@@ -73,7 +146,7 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
     
     split_info = None
     offering_info = None
-    sec_filings_list = []
+    sec_filings_details = []
     catalysts = []
 
     try:
@@ -106,56 +179,66 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
             doc_descs = recent.get("primaryDocDescription", [])
             items_list = recent.get("items", [])
 
-            # تجميع أحدث 4 إفصاحات للعرض
-            seen_forms = []
+            # أحدث 4 إفصاحات مع تحليل مضامينها
             for i in range(min(12, len(forms))):
                 f_form = forms[i]
                 f_date = filing_dates[i]
-                if len(seen_forms) < 4:
-                    seen_forms.append(f"{f_form} ({f_date})")
-
+                f_upper = f_form.upper()
                 acc_num = accession_numbers[i]
                 acc_clean = acc_num.replace("-", "")
                 p_doc = primary_docs[i]
                 desc = doc_descs[i] if i < len(doc_descs) else ""
                 item_val = items_list[i] if i < len(items_list) else ""
 
-                # أ) البحث عن التقسيم العكسي (للأسهم < 1.0$)
-                if check_split and not split_info and f_form in ["6-K", "8-K", "DEF 14A", "424B5"]:
-                    if "split" in desc.lower() or "consolidation" in desc.lower() or f_form in ["6-K", "8-K"]:
-                        doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
-                        try:
-                            doc_res = requests.get(doc_url, headers=sec_headers, timeout=4)
-                            if doc_res.status_code == 200:
-                                text_clean = re.sub('<[^<]+?>', ' ', doc_res.text)
-                                ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
-                                date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
+                doc_text = ""
+                # جلب النص عند الحاجة لإفصاحات الطرح أو التقسيم العكسي
+                if f_upper.startswith("424B") or f_upper in ["6-K", "8-K", "S-1", "F-1"]:
+                    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
+                    try:
+                        doc_res = requests.get(doc_url, headers=sec_headers, timeout=3.5)
+                        if doc_res.status_code == 200:
+                            doc_text = doc_res.text
+                    except Exception:
+                        pass
 
-                                if ratio_match:
-                                    r_val = ratio_match.group(1) or ratio_match.group(2)
-                                    d_str = date_match.group(1) if date_match else f_date
-                                    split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
-                                elif "reverse split" in text_clean.lower():
-                                    split_info = f"معلن بإفصاح {f_form} بتاريخ {f_date}"
-                        except Exception:
-                            pass
+                brief_desc = get_form_description(f_form, desc, item_val, doc_text)
+                if len(sec_filings_details) < 4:
+                    sec_filings_details.append(f"• <b>Form {f_form}</b> ({f_date}): {brief_desc}")
+
+                # أ) البحث عن التقسيم العكسي (للأسهم < 1.0$)
+                if check_split and not split_info and f_upper in ["6-K", "8-K", "DEF 14A", "PRE 14A", "424B5", "424B3"]:
+                    if doc_text:
+                        text_clean = re.sub('<[^<]+?>', ' ', doc_text)
+                        ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
+                        date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
+
+                        if ratio_match:
+                            r_val = ratio_match.group(1) or ratio_match.group(2)
+                            d_str = date_match.group(1) if date_match else f_date
+                            split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
+                        elif "reverse split" in text_clean.lower():
+                            split_info = f"معلن بإفصاح {f_form} بتاريخ {f_date}"
 
                 # ب) الورنتس والإصدارات القابلة للتنفيذ
-                if not offering_info and f_form in ["424B5", "S-1", "F-1", "S-3", "F-3", "8-K", "6-K"]:
-                    if f_form in ["424B5", "S-1", "F-1"] or "warrant" in desc.lower() or "offering" in desc.lower() or "issuance" in desc.lower():
-                        doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
-                        try:
-                            doc_res = requests.get(doc_url, headers=sec_headers, timeout=4)
-                            if doc_res.status_code == 200:
-                                text_clean = re.sub('<[^<]+?>', ' ', doc_res.text)
-                                ex_price_match = re.search(r'(?:exercise\s+price|offering\s+price|purchase\s+price)\s+(?:of|is|equal\s+to)?\s*\$?\s*([0-9]+\.?[0-9]*)|\$([0-9]+\.?[0-9]*)\s+per\s+(?:warrant|share)', text_clean, re.IGNORECASE)
-                                qty_match = re.search(r'(?:up\s+to\s+)?([0-9,]+)\s*(?:warrants|shares|common\s+shares|units)', text_clean, re.IGNORECASE)
+                if not offering_info and (f_upper.startswith("424B") or f_upper.startswith("S-") or f_upper.startswith("F-") or f_upper in ["8-K", "6-K"]):
+                    if doc_text:
+                        text_clean = re.sub('<[^<]+?>', ' ', doc_text)
+                        ex_price_match = re.search(r'(?:exercise\s+price|offering\s+price|purchase\s+price|public\s+offering\s+price)\s+(?:of|is|equal\s+to|at)?\s*\$?\s*([0-9]+\.?[0-9]*)|\$([0-9]+\.?[0-9]*)\s+per\s+(?:warrant|share|unit)', text_clean, re.IGNORECASE)
+                        qty_match = re.search(r'(?:up\s+to\s+|offering\s+of\s+|resale\s+of\s+up\s+to\s+)?([0-9,]{4,})\s*(?:warrants|shares|common\s+shares|units)', text_clean, re.IGNORECASE)
 
-                                ex_p = f"${ex_price_match.group(1) or ex_price_match.group(2)}" if ex_price_match else "غير محدد"
-                                qty = f"{qty_match.group(1)}" if qty_match else "غير محددة"
-                                offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} | سعر التنفيذ: {ex_p}"
-                        except Exception:
-                            pass
+                        ex_p = f"${ex_price_match.group(1) or ex_price_match.group(2)}" if ex_price_match else None
+                        qty = f"{qty_match.group(1)}" if qty_match else None
+
+                        if ex_p and qty:
+                            offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} | سعر التنفيذ/الطرح: {ex_p}"
+                        elif qty:
+                            offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} سهم"
+                        elif ex_p:
+                            offering_info = f"طرح/إصدار {f_form} ({f_date}) | سعر التنفيذ: {ex_p}"
+                        else:
+                            offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
+                    elif f_upper.startswith("424B"):
+                        offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
 
                 # ج) فحص أخبار المحفزات الإيجابية من إفصاحات SEC الرسمية
                 desc_lower = desc.lower()
@@ -171,8 +254,6 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
                     catalysts.append(f"تجارب سريرية (إفصاح {f_form} {f_date})")
                 elif "contract" in desc_lower or "partnership" in desc_lower:
                     catalysts.append(f"عقد/شراكة استراتيجية (إفصاح {f_form} {f_date})")
-
-            sec_filings_list = seen_forms
 
     except Exception as e:
         print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
@@ -191,9 +272,9 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
                         clean_t = clean_t[:62] + "..."
                     catalysts.append(f"خبر: {clean_t}")
     except Exception as e:
-        print(f"⚠️ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
+        print(f"⚠️️ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
 
-    sec_summary = ", ".join(sec_filings_list) if sec_filings_list else "لا توجد إفصاحات حديثة"
+    sec_summary = "\n".join(sec_filings_details) if sec_filings_details else "• لا توجد إفصاحات حديثة"
     
     # تنقية وتنسيق المحفزات الفريدة
     unique_catalysts = list(dict.fromkeys(catalysts))
@@ -441,12 +522,9 @@ def main():
             lines = [
                 f"{alert_title}",
                 f"<b>رمز السهم:</b> {symbol}",
-                f"<b>القطاع:</b> {sector}",
-                f"<b>الصناعة:</b> {industry}",
-                f"<b>الدوله:</b> {country}",
-                f"<b>السعر الحالي:</b> ${price:.2f}",
-                f"<b>التغير للجلسة الحالية +-٪:</b> {change_pct:+.2f}%",
-                f"<b>Vol:</b> {format_number(volume)}"
+                f"<b>القطاع:</b> {sector} | <b>الصناعة:</b> {industry}",
+                f"<b>الدوله:</b> {country} | <b>السعر:</b> ${price:.2f}",
+                f"<b>التغير:</b> {change_pct:+.2f}% | <b>Vol:</b> {format_number(volume)}"
             ]
 
             # 1. التقسيم العكسي: للأسهم أقل من $1.0 فقط
@@ -454,13 +532,13 @@ def main():
                 lines.append(f"<b>SCHEDULE to splitting:</b> {split_sched or 'لا توجد جدولة معلنة'}")
 
             # 2. الورنتس والإصدارات القابلة للتنفيذ (لكل الأسهم)
-            lines.append(f"<b>ورنتس / إصدارات قابلة للتنفيذ:</b> {warrants_info or 'لا توجد ورنتس/إصدارات معلنة مؤخراً'}")
+            lines.append(f"<b>ورنتس / إصدارات:</b> {warrants_info or 'لا توجد إصدارات معلنة مؤخراً'}")
 
             # 3. أخبار المحفزات الإيجابية (Forward Catalysts)
-            lines.append(f"<b>اخبار المحفزات الإيجابية (Forward Catalysts):</b> {catalyst_str}")
+            lines.append(f"<b>المحفزات (Forward Catalysts):</b> {catalyst_str}")
 
-            # 4. إفصاحات SEC الرسمية مع رابط مباشر
-            lines.append(f"<b>إفصاحات SEC:</b> {sec_summary} | <a href='{sec_browse_url}'>عرض الإفصاحات</a>")
+            # 4. إفصاحات SEC الرسمية بتنسيق مدمج ومفهوم
+            lines.append(f"<b>إفصاحات SEC الحديثة:</b>\n{sec_summary}\n🔗 <a href='{sec_browse_url}'>عرض كافة الإفصاحات</a>")
 
             # 5. رابط الشارت
             lines.extend([
