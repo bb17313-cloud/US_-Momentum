@@ -207,6 +207,12 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
                 desc = doc_descs[i] if i < len(doc_descs) else ""
                 item_val = items_list[i] if i < len(items_list) else ""
 
+                # الرابط المباشر لمستند الإفصاح في SEC (يُستخدم في الإفصاحات والإصدارات والمحفزات)
+                if p_doc:
+                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
+                else:
+                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{acc_num}-index.htm"
+
                 doc_text = ""
                 if f_upper.startswith("424B") or f_upper in ["6-K", "8-K", "S-1", "F-1", "4"]:
                     doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
@@ -219,7 +225,7 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
 
                 brief_desc = get_form_description(f_form, desc, item_val, doc_text)
                 if len(sec_filings_details) < 4:
-                    sec_filings_details.append(f"• <b>{f_form}</b> ({f_date}): {brief_desc}")
+                    sec_filings_details.append(f"• <b>{f_form}</b> ({f_date}): <a href='{filing_url}'>{brief_desc}</a>")
 
                 # أ) البحث عن التقسيم العكسي (للأسهم < 1.0$)
                 if check_split and not split_info and f_upper in ["6-K", "8-K", "DEF 14A", "PRE 14A", "424B5", "424B3"]:
@@ -256,8 +262,13 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
                     elif f_upper.startswith("424B"):
                         offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
 
+                    # رابط مصدر الإصدار
+                    if offering_info:
+                        offering_info = f"<a href='{filing_url}'>{offering_info}</a>"
+
                 # ج) فحص أخبار المحفزات الإيجابية من إفصاحات SEC الرسمية
                 desc_lower = desc.lower()
+                catalysts_before = len(catalysts)
                 if "1.01" in str(item_val) or "entry into a material definitive agreement" in desc_lower:
                     catalysts.append(f"اتفاقية جوهرية جديدة (8-K {f_date})")
                 elif "2.02" in str(item_val) or "results of operations" in desc_lower or "earnings" in desc_lower:
@@ -271,6 +282,10 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
                 elif "contract" in desc_lower or "partnership" in desc_lower:
                     catalysts.append(f"عقد/شراكة استراتيجية (إفصاح {f_form} {f_date})")
 
+                # رابط مصدر المحفز
+                if len(catalysts) > catalysts_before:
+                    catalysts[-1] = f"<a href='{filing_url}'>{catalysts[-1]}</a>"
+
     except Exception as e:
         print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
 
@@ -280,13 +295,18 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
         rss_res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
         if rss_res.status_code == 200:
             titles = re.findall(r'<title>(.*?)</title>', rss_res.text)
-            for t in titles[1:8]:
+            links = re.findall(r'<link>(.*?)</link>', rss_res.text)
+            for n, t in enumerate(titles[1:8], start=1):
                 t_lower = t.lower()
                 if any(kw in t_lower for kw in ["fda", "approval", "pdufa", "phase 1", "phase 2", "phase 3", "contract", "partnership", "earnings", "patent", "buyback", "acquisition", "merger"]):
                     clean_t = t.replace("&quot;", '"').replace("&amp;", "&")
                     if len(clean_t) > 65:
                         clean_t = clean_t[:62] + "..."
-                    catalysts.append(f"خبر: {clean_t}")
+                    news_link = links[n].strip() if n < len(links) else None
+                    if news_link:
+                        catalysts.append(f"<a href='{news_link}'>خبر: {clean_t}</a>")
+                    else:
+                        catalysts.append(f"خبر: {clean_t}")
     except Exception as e:
         print(f"⚠ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
 
