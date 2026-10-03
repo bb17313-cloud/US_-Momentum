@@ -504,9 +504,9 @@ def main():
 
             # تنسيق البطاقة بشكل مريح للعين (تصغير الخط وترتيب الأسطر)
             lines = [
-                f"<b>{alert_title} | {symbol}</b>",
-                f"🏷 <code>{sector}</code> / <code>{industry}</code>",
-                f"💵 <b>السعر:</b> <code>${price:.2f}</code> | <b>التغير:</b> <code>{change_pct:+.2f}%</code> | <b>Vol:</b> <code>{format_number(volume)}</code>",
+                f"<b>{alert_title} | {symbol} | {country}</b>",
+                f"🏷 <b>القطاع:</b> {sector} | <b>الصناعة:</b> {industry}",
+                f"💵 <b>السعر:</b> ${price:.2f} | <b>التغير:</b> {change_pct:+.2f}% | <b>Vol:</b> {format_number(volume)}",
             ]
 
             if price < 1.0:
