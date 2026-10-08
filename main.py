@@ -322,4 +322,245 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                             catalysts.append(f"اتفاقية جوهرية جديدة (8-K {f_date})")
                         elif "2.02" in str(item_val) or "results of operations" in desc_lower or "earnings" in desc_lower:
                             catalysts.append(f"إعلان نتائج مالية وأرباح (8-K {f_date})")
-                        elif "fda" in
+                        elif "fda" in desc_lower or "pdufa" in desc_lower or "approval" in desc_lower:
+                            catalysts.append(f"موافقة/إفصاح FDA (إفصاح {f_form} {f_date})")
+                        elif "patent" in desc_lower:
+                            catalysts.append(f"براءة اختراع جديدة (إفصاح {f_form} {f_date})")
+                        elif "trial" in desc_lower or "phase" in desc_lower:
+                            catalysts.append(f"تجارب سريرية (إفصاح {f_form} {f_date})")
+                        elif "contract" in desc_lower or "partnership" in desc_lower:
+                            catalysts.append(f"عقد/شراكة استراتيجية (إفصاح {f_form} {f_date})")
+
+                        if len(catalysts) > catalysts_before:
+                            catalysts[-1] = f"<a href='{filing_url}'>{catalysts[-1]}</a>"
+
+    except Exception as e:
+        print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
+
+    try:
+        rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
+        rss_res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
+        if rss_res.status_code == 200:
+            titles = re.findall(r'<title>(.*?)</title>', rss_res.text)
+            links = re.findall(r'<link>(.*?)</link>', rss_res.text)
+            for n, t in enumerate(titles[1:8], start=1):
+                clean_t = t.replace("&quot;", '"').replace("&amp;", "&")
+                if len(clean_t) > 65:
+                    clean_t = clean_t[:62] + "..."
+                news_link = links[n].strip() if n < len(links) else None
+                
+                clean_t_ar = translate_to_arabic(clean_t)
+                
+                if news_link:
+                    catalysts.append(f"<a href='{news_link}'>خبر: {clean_t_ar}</a>")
+                else:
+                    catalysts.append(f"خبر: {clean_t_ar}")
+    except Exception as e:
+        print(f"⚠️ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
+
+    sec_summary = "\n".join(sec_filings_details) if sec_filings_details else "• لا توجد إفصاحات حديثة"
+    unique_catalysts = list(dict.fromkeys(catalysts))
+    catalyst_str = " | ".join(unique_catalysts[:4]) if unique_catalysts else "لا توجد محفزات رصدت مؤخراً"
+
+    return split_info, offering_info, sec_summary, catalyst_str, cik_str_val
+
+# ================================
+# جلب بيانات الأسهم (TradingView API)
+# ================================
+def fetch_filtered_stocks(session_type):
+    url = "https://scanner.tradingview.com/america/scan"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/json"
+    }
+
+    price_field = "close"
+    change_field = "change"
+    volume_field = "volume"
+    
+    if session_type == "premarket":
+        price_field = "premarket_close"
+        change_field = "premarket_change"
+        volume_field = "premarket_volume"
+    elif session_type == "postmarket":
+        price_field = "postmarket_close"
+        change_field = "postmarket_change"
+        volume_field = "postmarket_volume"
+
+    filters = [
+        {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000},
+        {"left": volume_field, "operation": "greater", "right": 30_000},
+        {"left": change_field, "operation": "greater", "right": 2.0},
+        {"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000},
+        {"left": "close", "operation": "less", "right": 50.0},
+        {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}
+    ]
+
+    if session_type == "market":
+        filters.append({"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.2})
+
+    payload = {
+        "filter": filters,
+        "options": {"lang": "en"},
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": [
+            "name",          # Index 0
+            "description",   # Index 1
+            price_field,     # Index 2
+            change_field,    # Index 3
+            volume_field,    # Index 4
+            "sector",        # Index 5
+            "industry",      # Index 6
+            "country",       # Index 7
+            "exchange",      # Index 8
+            "close"          # Index 9
+        ],
+        "sort": {"sortBy": change_field, "sortOrder": "desc"},
+        "range": [0, MAX_SHOWN]
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=12)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        print(f"📊 عدد الأسهم المسترجعة من API: {len(data)}")
+        return data
+    except Exception as e:
+        print(f"❌ خطأ أثناء جلب البيانات: {e}")
+        return []
+
+# ================================
+# أدوات المساعدة والإرسال
+# ================================
+def escape_html(text):
+    if not text:
+        return "غير محدد"
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def format_number(num):
+    if not num:
+        return "0"
+    if num >= 1_000_000:
+        return f"{num / 1_000_000:.2f}M"
+    elif num >= 1_000:
+        return f"{num / 1_000:.1f}K"
+    return f"{num:.2f}"
+
+def send_telegram(text):
+    if not TOKEN or not CHAT_ID:
+        print("⚠️ BOT_TOKEN أو CHAT_ID غير محدد في متغيرات البيئة.")
+        return False
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=15,
+        )
+        res.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"❌ خطأ في إرسال التليجرام: {e}")
+        return False
+
+def send_in_chunks(header, blocks):
+    current_message = header + "\n\n"
+    for block in blocks:
+        if len(current_message) + len(block) + 2 > 3900:
+            send_telegram(current_message)
+            current_message = block + "\n\n"
+        else:
+            current_message += block + "\n\n"
+    if current_message.strip():
+        send_telegram(current_message)
+
+# ================================
+# التنفيذ لمرة واحدة (Single Run)
+# ================================
+def main():
+    today, counts = load_seen()
+    now_str = datetime.now(RIYADH).strftime("%H:%M:%S")
+    session_key, session_name = get_current_session()
+
+    if session_key == "closed":
+        print(f"⏸️ [{now_str}] السوق مغلق حالياً ({session_name}).")
+        return
+
+    print(f"⏰ [{now_str}] جاري الفحص | الجلسة: {session_name}")
+    stocks = fetch_filtered_stocks(session_key)
+
+    if stocks:
+        header = (
+            f"🇺🇸 <b>رادار الأسهم الأمريكية</b>\n"
+            f"⏱️ <b>الجلسة:</b> {session_name} | <code>{now_str} KSA</code>\n"
+            f"────────────────────────"
+        )
+        
+        blocks = []
+        for item in stocks:
+            d = item.get("d", [])
+            if len(d) < 9:
+                continue
+
+            symbol = escape_html(d[0])
+            price_val = d[2] if d[2] is not None else d[9]
+            price = float(price_val or 0)
+            
+            change_pct = float(d[3] or 0)
+            volume = float(d[4] or 0)
+            sector = escape_html(d[5])
+            industry = escape_html(d[6])
+            country = escape_html(d[7])
+            exchange = escape_html(d[8])
+
+            latest_updates = fetch_tradingview_latest_updates(symbol, exchange)
+
+            curr_count = counts.get(symbol, 0) + 1
+            counts[symbol] = curr_count
+
+            alert_title = "🚨 Alert" if curr_count == 1 else f"🚨 Alert {curr_count}"
+            tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
+
+            split_sched, warrants_info, sec_summary, catalyst_str, cik_code = fetch_sec_filings_and_catalysts(
+                symbol, 
+                check_split=(price < 1.0),
+                change_pct=change_pct
+            )
+
+            if cik_code:
+                sec_browse_url = f"https://www.sec.gov/edgar/browse/?CIK={cik_code}"
+            else:
+                sec_browse_url = "https://www.sec.gov/edgar/searchedgar/companysearch"
+
+            lines = [
+                f"<b>{alert_title} | {symbol} | {country}</b>",
+                f"🏷 <b>القطاع:</b> {sector} | <b>الصناعة:</b> {industry}",
+                f"💵 <b>السعر:</b> ${price:.2f} | <b>التغير:</b> {change_pct:+.2f}% | <b>Vol:</b> {format_number(volume)}",
+            ]
+
+            if price < 1.0:
+                lines.append(f"📉 <b>Reverse Split:</b> {split_sched or 'لا توجد جدولة'}")
+
+            lines.append(f"📋 <b>الإصدارات:</b> {warrants_info or 'لا توجد إصدارات معلنة'}")
+            lines.append(f"⚡ <b>المحفزات والأخبار (حتى 4):</b>\n{catalyst_str}")
+            lines.append(f"📲 <b>Latest updates:</b> {latest_updates}")
+            lines.append(f"📄 <b>إفصاحات SEC:</b>\n{sec_summary}")
+            
+            lines.extend([
+                f"🔗 <a href='{sec_browse_url}'>إفصاحات SEC</a> | 📊 <a href='{tv_url}'>TradingView</a>",
+                "────────────────────────"
+            ])
+            blocks.append("\n".join(lines))
+
+        save_seen(today, counts)
+        send_in_chunks(header, blocks)
+        print(f"✅ تم إرسال {len(blocks)} سهم بنجاح.")
+    else:
+        print(f"ℹ [{now_str}] لا توجد أسهم تطابق الشروط حالياً.")
+
+if __name__ == "__main__":
+    main()
