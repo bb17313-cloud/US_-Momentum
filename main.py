@@ -2,6 +2,7 @@ import os
 import json
 import re
 import requests
+import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,23 @@ RIYADH = ZoneInfo("Asia/Riyadh")
 NEW_YORK = ZoneInfo("America/New_York")
 SEEN_FILE = "seen_stocks.json"
 MAX_SHOWN = 20
+
+# ================================
+# دالة ترجمة للنصوص (من الإنجليزية إلى العربية)
+# ================================
+def translate_to_arabic(text):
+    if not text:
+        return text
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q={urllib.parse.quote(text)}"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+        if res.status_code == 200:
+            result = res.json()
+            translated = "".join([item[0] for item in result[0] if item[0]])
+            return translated if translated else text
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء الترجمة: {e}")
+    return text
 
 # ================================
 # إدارة ملف التكرارات والتحقق اليومي
@@ -64,11 +82,10 @@ def get_current_session():
     elif 1600 <= time_num_ny < 2000:
         return "postmarket", "🌙 Post-Market (ما بعد الإغلاق)"
     else:
-        # إغلاق تام بعد Post-Market حتى افتتاح Pre-Market
         return "closed", "⏸️ المغلق (خارج أوقات التداول)"
 
 # ================================
-# جلب أحدث الأخبار المباشرة لـ TradingView
+# جلب أحدث الأخبار المباشرة لـ TradingView (مترجمة ومع رابط)
 # ================================
 def fetch_tradingview_latest_updates(symbol, exchange):
     headers = {
@@ -86,14 +103,20 @@ def fetch_tradingview_latest_updates(symbol, exchange):
                 latest = items[0]
                 title = latest.get("title", "")
                 pub_time = latest.get("published", None)
+                story_path = latest.get("storyPath", "")
                 
+                # رابط الخبر المباشر في TradingView
+                news_url = f"https://www.tradingview.com{story_path}" if story_path else f"https://www.tradingview.com/symbols/{exchange}-{symbol}/news/"
+
                 time_str = ""
                 if pub_time:
                     dt = datetime.fromtimestamp(pub_time, tz=ZoneInfo("UTC")).astimezone(RIYADH)
                     time_str = f" ({dt.strftime('%H:%M')} KSA)"
 
                 if title:
-                    return f"{title}{time_str} (TradingView)"
+                    # ترجمة عنوان الخبر للغة العربية
+                    title_ar = translate_to_arabic(title)
+                    return f"<a href='{news_url}'>{title_ar}</a>{time_str} (TradingView)"
     except Exception as e:
         print(f"⚠️ خطأ جلب أخبار TradingView لـ {symbol}: {e}")
 
@@ -301,7 +324,7 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                         if "1.01" in str(item_val) or "entry into a material definitive agreement" in desc_lower:
                             catalysts.append(f"اتفاقية جوهرية جديدة (8-K {f_date})")
                         elif "2.02" in str(item_val) or "results of operations" in desc_lower or "earnings" in desc_lower:
-                            catalysts.append(f"إعلان نتائج مالية/أرباح (8-K {f_date})")
+                            catalysts.append(f"إعلان نتائج مالية وأرباح (8-K {f_date})")
                         elif "fda" in desc_lower or "pdufa" in desc_lower or "approval" in desc_lower:
                             catalysts.append(f"موافقة/إفصاح FDA (إفصاح {f_form} {f_date})")
                         elif "patent" in desc_lower:
@@ -317,7 +340,7 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
     except Exception as e:
         print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
 
-    # جلب الأخبار الإضافية من Yahoo RSS
+    # جلب الأخبار الإضافية من Yahoo RSS مع الترجمة للعربية
     try:
         rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
         rss_res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
@@ -329,16 +352,19 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                 if len(clean_t) > 65:
                     clean_t = clean_t[:62] + "..."
                 news_link = links[n].strip() if n < len(links) else None
+                
+                # ترجمة الخبر إلى العربية
+                clean_t_ar = translate_to_arabic(clean_t)
+                
                 if news_link:
-                    catalysts.append(f"<a href='{news_link}'>خبر: {clean_t}</a>")
+                    catalysts.append(f"<a href='{news_link}'>خبر: {clean_t_ar}</a>")
                 else:
-                    catalysts.append(f"خبر: {clean_t}")
+                    catalysts.append(f"خبر: {clean_t_ar}")
     except Exception as e:
         print(f"⚠ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
 
     sec_summary = "\n".join(sec_filings_details) if sec_filings_details else "• لا توجد إفصاحات حديثة"
     unique_catalysts = list(dict.fromkeys(catalysts))
-    # جلب حتى 4 أخبار ومحفزات حديثة بدلاً من 2
     catalyst_str = " | ".join(unique_catalysts[:4]) if unique_catalysts else "لا توجد محفزات رصدت مؤخراً"
 
     return split_info, offering_info, sec_summary, catalyst_str, cik_str_val
@@ -496,7 +522,7 @@ def main():
             country = escape_html(d[7])
             exchange = escape_html(d[8])
 
-            # جلب Latest updates مباشرة عبر رابط TradingView News API المخصص
+            # جلب Latest updates المترجم للغة العربية والرابط القابل للنقر المباشر
             latest_updates = fetch_tradingview_latest_updates(symbol, exchange)
 
             curr_count = counts.get(symbol, 0) + 1
@@ -505,7 +531,7 @@ def main():
             alert_title = "🚨 Alert" if curr_count == 1 else f"🚨 Alert {curr_count}"
             tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
 
-            # جلب تفاصيل SEC وأخبار المحفزات (حتى 4 أخبار بالإضافة لخبر تحرك اليوم)
+            # جلب تفاصيل SEC وأخبار المحفزات
             split_sched, warrants_info, sec_summary, catalyst_str, cik_code = fetch_sec_filings_and_catalysts(
                 symbol, 
                 check_split=(price < 1.0),
@@ -515,33 +541,4 @@ def main():
             if cik_code:
                 sec_browse_url = f"https://www.sec.gov/edgar/browse/?CIK={cik_code}"
             else:
-                sec_browse_url = f"https://www.sec.gov/edgar/searchedgar/companysearch"
-
-            lines = [
-                f"<b>{alert_title} | {symbol} | {country}</b>",
-                f"🏷 <b>القطاع:</b> {sector} | <b>الصناعة:</b> {industry}",
-                f"💵 <b>السعر:</b> ${price:.2f} | <b>التغير:</b> {change_pct:+.2f}% | <b>Vol:</b> {format_number(volume)}",
-            ]
-
-            if price < 1.0:
-                lines.append(f"📉 <b>Reverse Split:</b> {split_sched or 'لا توجد جدولة'}")
-
-            lines.append(f"📋 <b>الإصدارات:</b> {warrants_info or 'لا توجد إصدارات معلنة'}")
-            lines.append(f"⚡ <b>المحفزات والأخبار (حتى 4):</b>\n{catalyst_str}")
-            lines.append(f"📲 <b>Latest updates:</b> {latest_updates}")
-            lines.append(f"📄 <b>إفصاحات SEC:</b>\n{sec_summary}")
-            
-            lines.extend([
-                f"🔗 <a href='{sec_browse_url}'>إفصاحات SEC</a> | 📊 <a href='{tv_url}'>TradingView</a>",
-                "────────────────────────"
-            ])
-            blocks.append("\n".join(lines))
-
-        save_seen(today, counts)
-        send_in_chunks(header, blocks)
-        print(f"✅ تم إرسال {len(blocks)} سهم بنجاح.")
-    else:
-        print(f"ℹ [{now_str}] لا توجد أسهم تطابق الشروط حالياً.")
-
-if __name__ == "__main__":
-    main()
+                sec_browse_url = f"
