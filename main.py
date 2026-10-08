@@ -12,6 +12,7 @@ TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
 RIYADH = ZoneInfo("Asia/Riyadh")
+NEW_YORK = ZoneInfo("America/New_York")
 SEEN_FILE = "seen_stocks.json"
 MAX_SHOWN = 20
 
@@ -42,20 +43,61 @@ def save_seen(today, counts):
         print(f"❌ خطأ في حفظ ملف السجل: {e}")
 
 # ================================
-# تحديد نوع الجلسة
+# تحديد نوع الجلسة بدقة بتوقيت نيويورك وتوقيت الرياض
 # ================================
 def get_current_session():
-    now = datetime.now(RIYADH)
-    time_num = now.hour * 100 + now.minute
+    now_ny = datetime.now(NEW_YORK)
+    
+    # فحص العطلة الأسبوعية (السبت والأحد)
+    if now_ny.weekday() in [5, 6]:
+        return "closed", "⏸️ المغلق (عطلة نهاية الأسبوع)"
 
-    if 1100 <= time_num < 1630:
+    time_num_ny = now_ny.hour * 100 + now_ny.minute
+
+    # Pre-market: 04:00 AM - 09:30 AM EST (11:00 AM - 04:30 PM KSA)
+    if 400 <= time_num_ny < 930:
         return "premarket", "🌅 Pre-Market (ما قبل الافتتاح)"
-    elif 1630 <= time_num < 2300:
+    # Main Market: 09:30 AM - 04:00 PM EST (04:30 PM - 11:00 PM KSA)
+    elif 930 <= time_num_ny < 1600:
         return "market", "🔔 Main Session (السوق الرئيسي)"
-    elif time_num >= 2300 or time_num < 300:
+    # Post-market: 04:00 PM - 08:00 PM EST (11:00 PM - 03:00 AM KSA)
+    elif 1600 <= time_num_ny < 2000:
         return "postmarket", "🌙 Post-Market (ما بعد الإغلاق)"
     else:
+        # إغلاق تام بعد Post-Market حتى افتتاح Pre-Market
         return "closed", "⏸️ المغلق (خارج أوقات التداول)"
+
+# ================================
+# جلب أحدث الأخبار المباشرة لـ TradingView
+# ================================
+def fetch_tradingview_latest_updates(symbol, exchange):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+    symbol_param = f"{exchange}:{symbol}"
+    url = f"https://news-headlines.tradingview.com/headlines/?category=stock&lang=en&symbol={symbol_param}"
+
+    try:
+        res = requests.get(url, headers=headers, timeout=4)
+        if res.status_code == 200:
+            items = res.json()
+            if isinstance(items, list) and len(items) > 0:
+                latest = items[0]
+                title = latest.get("title", "")
+                pub_time = latest.get("published", None)
+                
+                time_str = ""
+                if pub_time:
+                    dt = datetime.fromtimestamp(pub_time, tz=ZoneInfo("UTC")).astimezone(RIYADH)
+                    time_str = f" ({dt.strftime('%H:%M')} KSA)"
+
+                if title:
+                    return f"{title}{time_str} (TradingView)"
+    except Exception as e:
+        print(f"⚠️ خطأ جلب أخبار TradingView لـ {symbol}: {e}")
+
+    return "لا توجد تحديثات جديدة من TradingView"
 
 # ================================
 # دالة تلخيص وتحليل مضمون نماذج SEC
@@ -66,16 +108,13 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
     item_str = str(item_val)
     text_clean = re.sub('<[^<]+?>', ' ', doc_text) if doc_text else ""
 
-    # Form D (طرح خاص / إعفاء تنظيم D)
     if f_upper == "D":
         if "notice of exempt offering of securities" in desc_lower or "offering" in text_clean.lower():
             return "إشعار طرح خاص للأوراق المالية (Regulation D)"
         return "إشعار طرح أوراق مالية مستثناة (Form D)"
 
-    # Form 4 (تغييرات ملكية المطلعين - تحديد شراء أو بيع)
     if f_upper == "4":
         if text_clean:
-            # البحث عن رموز المعاملات P (شراء) أو S (بيع) في نماذج المطلعين
             if re.search(r'\bcode\s*[:\-]?\s*P\b', text_clean, re.IGNORECASE) or "purchase" in text_clean.lower() or "acquire" in text_clean.lower():
                 return "شراء أسهم من قبل مطلع (Insider Purchase)"
             elif re.search(r'\bcode\s*[:\-]?\s*S\b', text_clean, re.IGNORECASE) or "sale" in text_clean.lower() or "dispose" in text_clean.lower():
@@ -86,7 +125,6 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
             return "شراء/حيازة أسهم من قبل مطلع"
         return "تغييرات ملكية مطلع (شراء/بيع أسهم)"
 
-    # 1. تحليل نماذج النشرات والطرح 424B / S-1 / F-1 / S-3 (استخراج الأرقام بدقة)
     if f_upper.startswith("424B") or any(f_upper.startswith(p) for p in ["S-1", "F-1", "S-3", "F-3"]):
         if text_clean:
             resale_match = re.search(r'(?:resale\s+of\s+up\s+to|resale\s+of)\s+([0-9,]+)\s+shares(?:\s+of\s+class\s+a|\s+of\s+common\s+stock)?', text_clean, re.IGNORECASE)
@@ -104,7 +142,6 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
             return "نشرة طرح/إصدار أسهم وورنتس"
         return "نشرة طرح/إصدار أسهم عادية"
 
-    # 2. نموذج 8-K للأحداث الجوهرية (تحديد البند والمضمون بدقة)
     if f_upper == "8-K":
         if "1.01" in item_str or "material definitive agreement" in desc_lower:
             return "اتفاقية جوهرية جديدة (البند 1.01)"
@@ -123,7 +160,6 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
             return f"حدث جوهري: {doc_desc[:40].strip()}"
         return "إفصاح عن أحداث جوهرية (Form 8-K)"
 
-    # 3. نموذج 6-K للشركات الأجنبية
     if f_upper == "6-K":
         if "fda" in desc_lower:
             return "تطورات وموافقات FDA"
@@ -135,7 +171,6 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
             return f"تقرير أجنبي: {doc_desc[:40].strip()}"
         return "تقرير جوهري لشركة أجنبية (6-K)"
 
-    # 4. ملكية كبار المساهمين والمطلعين
     if "13G" in f_upper or "13D" in f_upper:
         return "إفصاح ملكية كبار المساهمين (>5%)"
     if f_upper == "425":
@@ -154,9 +189,9 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
     return "إفصاح رسمي معتمد"
 
 # ================================
-# تحليل وتعميق جلب بيانات SEC للتقسيم العكسي، الورنتس، الإفصاحات، والمحفزات
+# تحليل جلب بيانات SEC والأخبار (إمكانية استخراج حتى 4 أخبار مهمة)
 # ================================
-def fetch_sec_filings_and_catalysts(symbol, check_split=True):
+def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
     symbol = symbol.upper().strip()
     sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
     
@@ -166,130 +201,123 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
     catalysts = []
     cik_str_val = None
 
+    # إضافة خبر تحرك اليوم تلقائياً عند وجود ارتفاع ملحوظ
+    if abs(change_pct) >= 10.0:
+        dir_str = "ارتفاع" if change_pct > 0 else "انخفاض"
+        catalysts.append(f"تحرك اليوم: {dir_str} قوي بنسبة {change_pct:+.2f}%")
+
     try:
-        # 1. الحصول على CIK للسهم
         tickers_res = requests.get("https://www.sec.gov/files/company_tickers.json", headers=sec_headers, timeout=5)
-        if tickers_res.status_code != 200:
-            return split_info, offering_info, "غير متاح", "لا توجد محفزات رصدت مؤخراً", None
+        if tickers_res.status_code == 200:
+            tickers_data = tickers_res.json()
+            cik = None
+            cik_raw = None
+            for idx, val in tickers_data.items():
+                if val.get("ticker", "").upper() == symbol:
+                    cik = str(val.get("cik_str")).zfill(10)
+                    cik_raw = str(val.get("cik_str"))
+                    cik_str_val = cik_raw
+                    break
 
-        tickers_data = tickers_res.json()
-        cik = None
-        cik_raw = None
-        for idx, val in tickers_data.items():
-            if val.get("ticker", "").upper() == symbol:
-                cik = str(val.get("cik_str")).zfill(10)
-                cik_raw = str(val.get("cik_str"))
-                cik_str_val = cik_raw
-                break
+            if cik:
+                sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+                sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
+                if sub_res.status_code == 200:
+                    recent = sub_res.json().get("filings", {}).get("recent", {})
+                    forms = recent.get("form", [])
+                    accession_numbers = recent.get("accessionNumber", [])
+                    primary_docs = recent.get("primaryDocument", [])
+                    filing_dates = recent.get("filingDate", [])
+                    doc_descs = recent.get("primaryDocDescription", [])
+                    items_list = recent.get("items", [])
 
-        if not cik:
-            return split_info, offering_info, "غير متاح", "لا توجد محفزات رصدت مؤخراً", None
+                    for i in range(min(12, len(forms))):
+                        f_form = forms[i]
+                        f_date = filing_dates[i]
+                        f_upper = f_form.upper()
+                        acc_num = accession_numbers[i]
+                        acc_clean = acc_num.replace("-", "")
+                        p_doc = primary_docs[i]
+                        desc = doc_descs[i] if i < len(doc_descs) else ""
+                        item_val = items_list[i] if i < len(items_list) else ""
 
-        # 2. جلب قائمة الإفصاحات الحديثة
-        sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        sub_res = requests.get(sub_url, headers=sec_headers, timeout=5)
-        if sub_res.status_code == 200:
-            recent = sub_res.json().get("filings", {}).get("recent", {})
-            forms = recent.get("form", [])
-            accession_numbers = recent.get("accessionNumber", [])
-            primary_docs = recent.get("primaryDocument", [])
-            filing_dates = recent.get("filingDate", [])
-            doc_descs = recent.get("primaryDocDescription", [])
-            items_list = recent.get("items", [])
-
-            for i in range(min(12, len(forms))):
-                f_form = forms[i]
-                f_date = filing_dates[i]
-                f_upper = f_form.upper()
-                acc_num = accession_numbers[i]
-                acc_clean = acc_num.replace("-", "")
-                p_doc = primary_docs[i]
-                desc = doc_descs[i] if i < len(doc_descs) else ""
-                item_val = items_list[i] if i < len(items_list) else ""
-
-                # الرابط المباشر لمستند الإفصاح في SEC (يُستخدم في الإفصاحات والإصدارات والمحفزات)
-                if p_doc:
-                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
-                else:
-                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{acc_num}-index.htm"
-
-                doc_text = ""
-                if f_upper.startswith("424B") or f_upper in ["6-K", "8-K", "S-1", "F-1", "4"]:
-                    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
-                    try:
-                        doc_res = requests.get(doc_url, headers=sec_headers, timeout=3.5)
-                        if doc_res.status_code == 200:
-                            doc_text = doc_res.text
-                    except Exception:
-                        pass
-
-                brief_desc = get_form_description(f_form, desc, item_val, doc_text)
-                if len(sec_filings_details) < 4:
-                    sec_filings_details.append(f"• <b>{f_form}</b> ({f_date}): <a href='{filing_url}'>{brief_desc}</a>")
-
-                # أ) البحث عن التقسيم العكسي (للأسهم < 1.0$)
-                if check_split and not split_info and f_upper in ["6-K", "8-K", "DEF 14A", "PRE 14A", "424B5", "424B3"]:
-                    if doc_text:
-                        text_clean = re.sub('<[^<]+?>', ' ', doc_text)
-                        ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
-                        date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
-
-                        if ratio_match:
-                            r_val = ratio_match.group(1) or ratio_match.group(2)
-                            d_str = date_match.group(1) if date_match else f_date
-                            split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
-                        elif "reverse split" in text_clean.lower():
-                            split_info = f"معلن بإفصاح {f_form} بتاريخ {f_date}"
-
-                # ب) الورنتس والإصدارات القابلة للتنفيذ
-                if not offering_info and (f_upper.startswith("424B") or f_upper.startswith("S-") or f_upper.startswith("F-") or f_upper in ["8-K", "6-K"]):
-                    if doc_text:
-                        text_clean = re.sub('<[^<]+?>', ' ', doc_text)
-                        ex_price_match = re.search(r'(?:exercise\s+price|offering\s+price|purchase\s+price|public\s+offering\s+price)\s+(?:of|is|equal\s+to|at)?\s*\$?\s*([0-9]+\.?[0-9]*)|\$([0-9]+\.?[0-9]*)\s+per\s+(?:warrant|share|unit)', text_clean, re.IGNORECASE)
-                        qty_match = re.search(r'(?:up\s+to\s+|offering\s+of\s+|resale\s+of\s+up\s+to\s+)?([0-9,]{4,})\s*(?:warrants|shares|common\s+shares|units)', text_clean, re.IGNORECASE)
-
-                        ex_p = f"${ex_price_match.group(1) or ex_price_match.group(2)}" if ex_price_match else None
-                        qty = f"{qty_match.group(1)}" if qty_match else None
-
-                        if ex_p and qty:
-                            offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} | سعر التنفيذ/الطرح: {ex_p}"
-                        elif qty:
-                            offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} سهم"
-                        elif ex_p:
-                            offering_info = f"طرح/إصدار {f_form} ({f_date}) | سعر التنفيذ: {ex_p}"
+                        if p_doc:
+                            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
                         else:
-                            offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
-                    elif f_upper.startswith("424B"):
-                        offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
+                            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{acc_num}-index.htm"
 
-                    # رابط مصدر الإصدار
-                    if offering_info:
-                        offering_info = f"<a href='{filing_url}'>{offering_info}</a>"
+                        doc_text = ""
+                        if f_upper.startswith("424B") or f_upper in ["6-K", "8-K", "S-1", "F-1", "4"]:
+                            doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik_raw}/{acc_clean}/{p_doc}"
+                            try:
+                                doc_res = requests.get(doc_url, headers=sec_headers, timeout=3.5)
+                                if doc_res.status_code == 200:
+                                    doc_text = doc_res.text
+                            except Exception:
+                                pass
 
-                # ج) فحص أخبار المحفزات الإيجابية من إفصاحات SEC الرسمية
-                desc_lower = desc.lower()
-                catalysts_before = len(catalysts)
-                if "1.01" in str(item_val) or "entry into a material definitive agreement" in desc_lower:
-                    catalysts.append(f"اتفاقية جوهرية جديدة (8-K {f_date})")
-                elif "2.02" in str(item_val) or "results of operations" in desc_lower or "earnings" in desc_lower:
-                    catalysts.append(f"إعلان نتائج مالية/أرباح (8-K {f_date})")
-                elif "fda" in desc_lower or "pdufa" in desc_lower or "approval" in desc_lower:
-                    catalysts.append(f"موافقة/إفصاح FDA (إفصاح {f_form} {f_date})")
-                elif "patent" in desc_lower:
-                    catalysts.append(f"براءة اختراع جديدة (إفصاح {f_form} {f_date})")
-                elif "trial" in desc_lower or "phase" in desc_lower:
-                    catalysts.append(f"تجارب سريرية (إفصاح {f_form} {f_date})")
-                elif "contract" in desc_lower or "partnership" in desc_lower:
-                    catalysts.append(f"عقد/شراكة استراتيجية (إفصاح {f_form} {f_date})")
+                        brief_desc = get_form_description(f_form, desc, item_val, doc_text)
+                        if len(sec_filings_details) < 4:
+                            sec_filings_details.append(f"• <b>{f_form}</b> ({f_date}): <a href='{filing_url}'>{brief_desc}</a>")
 
-                # رابط مصدر المحفز
-                if len(catalysts) > catalysts_before:
-                    catalysts[-1] = f"<a href='{filing_url}'>{catalysts[-1]}</a>"
+                        if check_split and not split_info and f_upper in ["6-K", "8-K", "DEF 14A", "PRE 14A", "424B5", "424B3"]:
+                            if doc_text:
+                                text_clean = re.sub('<[^<]+?>', ' ', doc_text)
+                                ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
+                                date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
+
+                                if ratio_match:
+                                    r_val = ratio_match.group(1) or ratio_match.group(2)
+                                    d_str = date_match.group(1) if date_match else f_date
+                                    split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
+                                elif "reverse split" in text_clean.lower():
+                                    split_info = f"معلن بإفصاح {f_form} بتاريخ {f_date}"
+
+                        if not offering_info and (f_upper.startswith("424B") or f_upper.startswith("S-") or f_upper.startswith("F-") or f_upper in ["8-K", "6-K"]):
+                            if doc_text:
+                                text_clean = re.sub('<[^<]+?>', ' ', doc_text)
+                                ex_price_match = re.search(r'(?:exercise\s+price|offering\s+price|purchase\s+price|public\s+offering\s+price)\s+(?:of|is|equal\s+to|at)?\s*\$?\s*([0-9]+\.?[0-9]*)|\$([0-9]+\.?[0-9]*)\s+per\s+(?:warrant|share|unit)', text_clean, re.IGNORECASE)
+                                qty_match = re.search(r'(?:up\s+to\s+|offering\s+of\s+|resale\s+of\s+up\s+to\s+)?([0-9,]{4,})\s*(?:warrants|shares|common\s+shares|units)', text_clean, re.IGNORECASE)
+
+                                ex_p = f"${ex_price_match.group(1) or ex_price_match.group(2)}" if ex_price_match else None
+                                qty = f"{qty_match.group(1)}" if qty_match else None
+
+                                if ex_p and qty:
+                                    offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} | سعر التنفيذ/الطرح: {ex_p}"
+                                elif qty:
+                                    offering_info = f"طرح/إصدار {f_form} ({f_date}) | الكمية: {qty} سهم"
+                                elif ex_p:
+                                    offering_info = f"طرح/إصدار {f_form} ({f_date}) | سعر التنفيذ: {ex_p}"
+                                else:
+                                    offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
+                            elif f_upper.startswith("424B"):
+                                offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
+
+                            if offering_info:
+                                offering_info = f"<a href='{filing_url}'>{offering_info}</a>"
+
+                        desc_lower = desc.lower()
+                        catalysts_before = len(catalysts)
+                        if "1.01" in str(item_val) or "entry into a material definitive agreement" in desc_lower:
+                            catalysts.append(f"اتفاقية جوهرية جديدة (8-K {f_date})")
+                        elif "2.02" in str(item_val) or "results of operations" in desc_lower or "earnings" in desc_lower:
+                            catalysts.append(f"إعلان نتائج مالية/أرباح (8-K {f_date})")
+                        elif "fda" in desc_lower or "pdufa" in desc_lower or "approval" in desc_lower:
+                            catalysts.append(f"موافقة/إفصاح FDA (إفصاح {f_form} {f_date})")
+                        elif "patent" in desc_lower:
+                            catalysts.append(f"براءة اختراع جديدة (إفصاح {f_form} {f_date})")
+                        elif "trial" in desc_lower or "phase" in desc_lower:
+                            catalysts.append(f"تجارب سريرية (إفصاح {f_form} {f_date})")
+                        elif "contract" in desc_lower or "partnership" in desc_lower:
+                            catalysts.append(f"عقد/شراكة استراتيجية (إفصاح {f_form} {f_date})")
+
+                        if len(catalysts) > catalysts_before:
+                            catalysts[-1] = f"<a href='{filing_url}'>{catalysts[-1]}</a>"
 
     except Exception as e:
         print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
 
-    # 3. جلب الأخبار الإضافية من Yahoo RSS لرصد المحفزات الإيجابية
+    # جلب الأخبار الإضافية من Yahoo RSS
     try:
         rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
         rss_res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
@@ -297,39 +325,23 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True):
             titles = re.findall(r'<title>(.*?)</title>', rss_res.text)
             links = re.findall(r'<link>(.*?)</link>', rss_res.text)
             for n, t in enumerate(titles[1:8], start=1):
-                t_lower = t.lower()
-                if any(kw in t_lower for kw in ["fda", "approval", "pdufa", "phase 1", "phase 2", "phase 3", "contract", "partnership", "earnings", "patent", "buyback", "acquisition", "merger"]):
-                    clean_t = t.replace("&quot;", '"').replace("&amp;", "&")
-                    if len(clean_t) > 65:
-                        clean_t = clean_t[:62] + "..."
-                    news_link = links[n].strip() if n < len(links) else None
-                    if news_link:
-                        catalysts.append(f"<a href='{news_link}'>خبر: {clean_t}</a>")
-                    else:
-                        catalysts.append(f"خبر: {clean_t}")
+                clean_t = t.replace("&quot;", '"').replace("&amp;", "&")
+                if len(clean_t) > 65:
+                    clean_t = clean_t[:62] + "..."
+                news_link = links[n].strip() if n < len(links) else None
+                if news_link:
+                    catalysts.append(f"<a href='{news_link}'>خبر: {clean_t}</a>")
+                else:
+                    catalysts.append(f"خبر: {clean_t}")
     except Exception as e:
         print(f"⚠ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
 
     sec_summary = "\n".join(sec_filings_details) if sec_filings_details else "• لا توجد إفصاحات حديثة"
     unique_catalysts = list(dict.fromkeys(catalysts))
-    catalyst_str = " | ".join(unique_catalysts[:2]) if unique_catalysts else "لا توجد محفزات رصدت مؤخراً"
+    # جلب حتى 4 أخبار ومحفزات حديثة بدلاً من 2
+    catalyst_str = " | ".join(unique_catalysts[:4]) if unique_catalysts else "لا توجد محفزات رصدت مؤخراً"
 
     return split_info, offering_info, sec_summary, catalyst_str, cik_str_val
-
-# ================================
-# الدوال الرئيسية مع المصادر البديلة
-# ================================
-def check_reverse_split_schedule(symbol):
-    sec_split, _, _, _, _ = fetch_sec_filings_and_catalysts(symbol, check_split=True)
-    if sec_split:
-        return sec_split
-    return "لا توجد جدولة معلنة"
-
-def check_warrants_and_issuances(symbol):
-    _, sec_offering, _, _, _ = fetch_sec_filings_and_catalysts(symbol, check_split=False)
-    if sec_offering:
-        return sec_offering
-    return "لا توجد ورنتس/إصدارات معلنة مؤخراً"
 
 # ================================
 # جلب بيانات الأسهم (TradingView API)
@@ -380,8 +392,7 @@ def fetch_filtered_stocks(session_type):
             "industry",      # Index 6
             "country",       # Index 7
             "exchange",      # Index 8
-            "close",         # Index 9
-            "news_time"      # Index 10 - حقل أحدث أخبار وتحديثات TradingView
+            "close"          # Index 9
         ],
         "sort": {"sortBy": change_field, "sortOrder": "desc"},
         "range": [0, MAX_SHOWN]
@@ -455,7 +466,7 @@ def main():
     session_key, session_name = get_current_session()
 
     if session_key == "closed":
-        print(f"⏸️ [{now_str}] السوق مغلق حالياً.")
+        print(f"⏸️ [{now_str}] السوق مغلق حالياً ({session_name}).")
         return
 
     print(f"⏰ [{now_str}] جاري الفحص | الجلسة: {session_name}")
@@ -485,18 +496,8 @@ def main():
             country = escape_html(d[7])
             exchange = escape_html(d[8])
 
-            # معالجة Latest updates الخاصة باليوم من TradingView
-            news_time_raw = d[10] if len(d) > 10 else None
-            latest_updates = "لا توجد تحديثات اليوم"
-            
-            if news_time_raw:
-                try:
-                    news_dt = datetime.fromtimestamp(news_time_raw, tz=ZoneInfo("UTC")).astimezone(RIYADH)
-                    today_str = datetime.now(RIYADH).strftime("%Y-%m-%d")
-                    if news_dt.strftime("%Y-%m-%d") == today_str:
-                        latest_updates = f"تحديث أخبار جديد مسجل اليوم الساعة {news_dt.strftime('%H:%M')} KSA (TradingView)"
-                except Exception:
-                    pass
+            # جلب Latest updates مباشرة عبر رابط TradingView News API المخصص
+            latest_updates = fetch_tradingview_latest_updates(symbol, exchange)
 
             curr_count = counts.get(symbol, 0) + 1
             counts[symbol] = curr_count
@@ -504,19 +505,18 @@ def main():
             alert_title = "🚨 Alert" if curr_count == 1 else f"🚨 Alert {curr_count}"
             tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
 
-            # جلب تفاصيل SEC مع CIK الحقيقي المباشر لصفحة الشركة المخصصة
+            # جلب تفاصيل SEC وأخبار المحفزات (حتى 4 أخبار بالإضافة لخبر تحرك اليوم)
             split_sched, warrants_info, sec_summary, catalyst_str, cik_code = fetch_sec_filings_and_catalysts(
                 symbol, 
-                check_split=(price < 1.0)
+                check_split=(price < 1.0),
+                change_pct=change_pct
             )
 
-            # رابط صفحة الإفصاحات الخاصة بالشركة عبر CIK في SEC
             if cik_code:
                 sec_browse_url = f"https://www.sec.gov/edgar/browse/?CIK={cik_code}"
             else:
                 sec_browse_url = f"https://www.sec.gov/edgar/searchedgar/companysearch"
 
-            # تنسيق البطاقة بشكل مريح للعين (تصغير الخط وترتيب الأسطر)
             lines = [
                 f"<b>{alert_title} | {symbol} | {country}</b>",
                 f"🏷 <b>القطاع:</b> {sector} | <b>الصناعة:</b> {industry}",
@@ -527,11 +527,10 @@ def main():
                 lines.append(f"📉 <b>Reverse Split:</b> {split_sched or 'لا توجد جدولة'}")
 
             lines.append(f"📋 <b>الإصدارات:</b> {warrants_info or 'لا توجد إصدارات معلنة'}")
-            lines.append(f"⚡ <b>المحفزات:</b> {catalyst_str}")
+            lines.append(f"⚡ <b>المحفزات والأخبار (حتى 4):</b>\n{catalyst_str}")
             lines.append(f"📲 <b>Latest updates:</b> {latest_updates}")
             lines.append(f"📄 <b>إفصاحات SEC:</b>\n{sec_summary}")
             
-            # الروابط في سطر واحد منظم ومرتب
             lines.extend([
                 f"🔗 <a href='{sec_browse_url}'>إفصاحات SEC</a> | 📊 <a href='{tv_url}'>TradingView</a>",
                 "────────────────────────"
