@@ -212,7 +212,7 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
     return "إفصاح رسمي معتمد"
 
 # ================================
-# تحليل جلب بيانات SEC والأخبار (إمكانية استخراج حتى 4 أخبار مهمة)
+# تحليل جلب بيانات SEC والأخبار
 # ================================
 def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
     symbol = symbol.upper().strip()
@@ -224,7 +224,6 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
     catalysts = []
     cik_str_val = None
 
-    # إضافة خبر تحرك اليوم تلقائياً عند وجود ارتفاع ملحوظ
     if abs(change_pct) >= 10.0:
         dir_str = "ارتفاع" if change_pct > 0 else "انخفاض"
         catalysts.append(f"تحرك اليوم: {dir_str} قوي بنسبة {change_pct:+.2f}%")
@@ -234,4 +233,13 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
         if tickers_res.status_code == 200:
             tickers_data = tickers_res.json()
             cik = None
-            cik_
+            cik_raw = None
+            for idx, val in tickers_data.items():
+                if val.get("ticker", "").upper() == symbol:
+                    cik = str(val.get("cik_str")).zfill(10)
+                    cik_raw = str(val.get("cik_str"))
+                    cik_str_val = cik_raw
+                    break
+
+            if cik:
+                sub_url = f"
