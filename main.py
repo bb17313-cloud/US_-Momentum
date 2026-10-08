@@ -380,7 +380,8 @@ def fetch_filtered_stocks(session_type):
             "industry",      # Index 6
             "country",       # Index 7
             "exchange",      # Index 8
-            "close"          # Index 9
+            "close",         # Index 9
+            "news_time"      # Index 10 - حقل أحدث أخبار وتحديثات TradingView
         ],
         "sort": {"sortBy": change_field, "sortOrder": "desc"},
         "range": [0, MAX_SHOWN]
@@ -484,6 +485,19 @@ def main():
             country = escape_html(d[7])
             exchange = escape_html(d[8])
 
+            # معالجة Latest updates الخاصة باليوم من TradingView
+            news_time_raw = d[10] if len(d) > 10 else None
+            latest_updates = "لا توجد تحديثات اليوم"
+            
+            if news_time_raw:
+                try:
+                    news_dt = datetime.fromtimestamp(news_time_raw, tz=ZoneInfo("UTC")).astimezone(RIYADH)
+                    today_str = datetime.now(RIYADH).strftime("%Y-%m-%d")
+                    if news_dt.strftime("%Y-%m-%d") == today_str:
+                        latest_updates = f"تحديث أخبار جديد مسجل اليوم الساعة {news_dt.strftime('%H:%M')} KSA (TradingView)"
+                except Exception:
+                    pass
+
             curr_count = counts.get(symbol, 0) + 1
             counts[symbol] = curr_count
 
@@ -514,6 +528,7 @@ def main():
 
             lines.append(f"📋 <b>الإصدارات:</b> {warrants_info or 'لا توجد إصدارات معلنة'}")
             lines.append(f"⚡ <b>المحفزات:</b> {catalyst_str}")
+            lines.append(f"📲 <b>Latest updates:</b> {latest_updates}")
             lines.append(f"📄 <b>إفصاحات SEC:</b>\n{sec_summary}")
             
             # الروابط في سطر واحد منظم ومرتب
