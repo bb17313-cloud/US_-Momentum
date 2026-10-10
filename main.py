@@ -1,9 +1,11 @@
 import os
 import json
 import re
+import html
 import requests
 import urllib.parse
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 # ================================
@@ -16,6 +18,9 @@ RIYADH = ZoneInfo("Asia/Riyadh")
 NEW_YORK = ZoneInfo("America/New_York")
 SEEN_FILE = "seen_stocks.json"
 MAX_SHOWN = 20
+
+# آخر خبر جلبه TradingView لكل سهم (العنوان الأصلي) - يُستخدم لمنع تكراره داخل المحفزات
+_TV_LATEST = {}
 
 # ================================
 # دالة ترجمة للنصوص (من الإنجليزية إلى العربية)
@@ -113,6 +118,7 @@ def fetch_tradingview_latest_updates(symbol, exchange):
                     time_str = f" ({dt.strftime('%H:%M')} KSA)"
 
                 if title:
+                    _TV_LATEST[str(symbol).upper().strip()] = {"title": title, "url": news_url}
                     title_ar = translate_to_arabic(title)
                     return f"<a href='{news_url}'>{title_ar}</a>{time_str} (TradingView)"
     except Exception as e:
@@ -210,6 +216,186 @@ def get_form_description(f_form, doc_desc="", item_val="", doc_text=""):
     return "إفصاح رسمي معتمد"
 
 # ================================
+# دمج الأحداث (SEC + الأخبار) ومنع التكرار
+# ================================
+_NEWS_KIND_PATTERNS = [
+    ("reverse_split", ("reverse split", "reverse stock split")),
+    ("offering", ("offering", "private placement", "registered direct", "at-the-market")),
+    ("earnings", ("earnings", "results", "guidance", "outlook", "revenue")),
+    ("fda", ("fda", "pdufa", "approval")),
+    ("trial", ("clinical trial", "phase 1", "phase 2", "phase 3", "phase i", "phase ii", "phase iii")),
+    ("patent", ("patent",)),
+    ("deal", ("agreement", "contract", "partnership", "acquisition", "acquire", "merger", "award", "deal")),
+    ("management", ("ceo", "cfo", "appoints", "resigns")),
+    ("dividend", ("dividend",)),
+]
+
+_8K_KIND_BY_ITEM = [
+    ("3.03", "reverse_split"), ("5.03", "reverse_split"), ("3.02", "offering"),
+    ("3.01", "listing"), ("2.02", "earnings"), ("1.01", "deal"), ("5.02", "management"), ("2.03", "debt"),
+]
+
+_KIND_LABEL_AR = {
+    "reverse_split": "تجزئة عكسية", "offering": "طرح/إصدار", "earnings": "نتائج مالية/أرباح",
+    "deal": "اتفاقية جوهرية", "management": "تغيير في الإدارة", "debt": "التزام مالي جديد",
+    "dividend": "توزيعات", "listing": "إشعار شروط الإدراج والامتثال",
+    "fda": "موافقة/إفصاح FDA", "trial": "تجارب سريرية", "patent": "براءة اختراع",
+}
+
+SEC_FORMS_AR = {
+    "4": "معاملة مطلع", "D": "إشعار طرح خاص", "6-K": "تقرير شركة أجنبية", "8-K": "إفصاح عن أحداث جوهرية",
+    "10-Q": "التقرير الربع سنوي", "10-K": "التقرير السنوي", "20-F": "التقرير السنوي (أجنبية)",
+}
+
+ISSUANCE_FORMS = {
+    "S-1", "S-1/A", "S-3", "S-3/A", "F-1", "F-1/A", "F-3", "F-3/A", "D", "D/A",
+}
+
+def _news_kind(title):
+    t = title.lower()
+    for kind, keys in _NEWS_KIND_PATTERNS:
+        if any(re.search(rf"\b{re.escape(k)}", t) for k in keys):
+            return kind
+    return None
+
+def _filing_kind(f):
+    form = f["form"]
+    if form == "8-K":
+        for item, kind in _8K_KIND_BY_ITEM:
+            if item in f["items"]:
+                return kind, True
+        return _news_kind(f.get("desc", "") or ""), False
+    if form in ISSUANCE_FORMS or form.upper().startswith("424B"):
+        return "offering", True
+    if form in ("10-Q", "10-K", "20-F"):
+        return "earnings", False
+    if form == "6-K":
+        return _news_kind(f.get("desc", "") or ""), False
+    return None, False
+
+def _filing_label(f, kind):
+    if kind == "offering" and f["form"] == "8-K":
+        return "بيع أسهم غير مسجل"
+    if f["form"] != "8-K" and f.get("brief"):
+        return f["brief"]
+    return _KIND_LABEL_AR.get(kind, SEC_FORMS_AR.get(f["form"], f["form"]))
+
+def _days_apart(d1, d2):
+    try:
+        return abs((datetime.strptime(d1, "%Y-%m-%d") - datetime.strptime(d2, "%Y-%m-%d")).days)
+    except Exception:
+        return 999
+
+def _title_tokens(title):
+    t = re.sub(r"\s[-–|]\s[^-–|]{2,30}$", "", title.lower())
+    return {w for w in re.findall(r"[a-z0-9$%.]+", t) if len(w) > 2}
+
+def _same_story(a, b):
+    ta, tb = _title_tokens(a), _title_tokens(b)
+    if not ta or not tb:
+        return False
+    inter = len(ta & tb)
+    return inter >= 4 and inter / min(len(ta), len(tb)) >= 0.7
+
+def _parse_news_date(s):
+    try:
+        return parsedate_to_datetime(s.strip()).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now(NEW_YORK).strftime("%Y-%m-%d")
+
+def format_filing_line(f):
+    return f"• <b>{f['form']}</b> ({f['date']}): <a href='{f['url']}'>{f['brief']}</a>"
+
+def _render_event(ev, prefix="• "):
+    raw = ev["title"] or ev["label"]
+    if ev["title"]:
+        short = raw if len(raw) <= 80 else raw[:77] + "..."
+        raw = translate_to_arabic(short)
+    text = html.escape(raw)
+    if ev.get("note"):
+        text += f" ({html.escape(ev['note'])})"
+    links = " · ".join(f"<a href='{u}'>{html.escape(n)}</a>" for n, u in ev["links"][:3] if u)
+    line = f'{prefix}{text} <code>{ev["date"]}</code>'
+    return f"{line} — {links}" if links else line
+
+def build_alert_sections(filings, news_items, sec_limit=4, cat_limit=5, skip_events_acc=(), skip_sec_acc=()):
+    """يدمج SEC + الأخبار: كل حدث يظهر مرة واحدة وتتجمع مصادره في سطر واحد"""
+    events = []
+
+    # 1) الأخبار: نفس القصة من أكثر من مصدر = حدث واحد
+    for n in news_items:
+        src = n.get("source") or "News"
+        target = next((e for e in events if e["title"] and _same_story(e["title"], n["title"])), None)
+        if target:
+            if src not in [x[0] for x in target["links"]]:
+                target["links"].append((src, n["url"]))
+            continue
+        events.append({"kind": _news_kind(n["title"]), "date": n["date"], "title": n["title"],
+                       "label": "", "links": [(src, n["url"])], "acc": None, "note": None})
+
+    # 2) الإفصاحات: تُدمج مع خبر من نفس النوع (±3 أيام) وإلا تظهر وحدها مرة لكل نوع
+    seen_alone = set()
+    for f in filings:
+        kind, alone = _filing_kind(f)
+        if not kind:
+            continue
+        target = next((e for e in events if e["kind"] == kind and e["acc"] is None and e["title"]
+                       and _days_apart(e["date"], f["date"]) <= 3), None)
+        if target:
+            target["links"].insert(0, (f["form"], f["url"]))
+            target["acc"] = f["accession"]
+            if kind in ("offering", "reverse_split") and f["form"] != "8-K" and f.get("brief"):
+                target["note"] = f["brief"]
+        elif alone and kind not in seen_alone:
+            seen_alone.add(kind)
+            events.append({"kind": kind, "date": f["date"], "title": None, "label": _filing_label(f, kind),
+                           "links": [(f["form"], f["url"])], "acc": f["accession"], "note": None})
+
+    # 3) التوزيع على الأقسام (الأحداث المصنّفة أولاً ثم الأحدث تاريخاً)
+    skip_events_acc = {a for a in skip_events_acc if a}
+    skip_sec_acc = {a for a in skip_sec_acc if a}
+    ordered = sorted(events, key=lambda e: e["date"], reverse=True)
+    ordered.sort(key=lambda e: e["kind"] is None)
+    ordered = [e for e in ordered if not (e["title"] is None and e["acc"] in skip_events_acc)]
+
+    corp = [e for e in ordered if e["kind"] == "reverse_split"][:2]
+    issuance = [e for e in ordered if e["kind"] == "offering" and e["acc"]][:2]
+    taken = {id(e) for e in corp + issuance}
+    rest = [e for e in ordered if id(e) not in taken]
+    cats = rest[:cat_limit]
+    omitted = len(rest) - len(cats)
+
+    corp_lines = [_render_event(e, prefix="📉 ") for e in corp]
+    catalyst_lines = [_render_event(e) for e in cats]
+    if omitted > 0:
+        catalyst_lines.append(f"➕ {omitted} أخبار/أحداث أخرى غير معروضة")
+
+    # 4) إفصاحات SEC التي لم تظهر أعلاه (نموذج واحد لكل يوم)
+    shown = {e["acc"] for e in corp + issuance + cats if e["acc"]} | skip_sec_acc
+    counts = {}
+    for f in filings:
+        counts[(f["form"], f["date"])] = counts.get((f["form"], f["date"]), 0) + 1
+    sec_lines, seen_keys = [], set()
+    for f in filings:
+        key = (f["form"], f["date"])
+        if f["accession"] in shown or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        line = format_filing_line(f)
+        if counts[key] > 1:
+            line += f" ×{counts[key]}"
+        sec_lines.append(line)
+        if len(sec_lines) >= sec_limit:
+            break
+
+    return {
+        "corp": corp_lines,
+        "issuance": [_render_event(e) for e in issuance],
+        "catalysts": catalyst_lines,
+        "sec": sec_lines,
+    }
+
+# ================================
 # تحليل جلب بيانات SEC والأخبار
 # ================================
 def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
@@ -217,8 +403,11 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
     sec_headers = {"User-Agent": "StockRadarBot/1.0 (contact@stockradar.com)"}
     
     split_info = None
+    split_acc = None
     offering_info = None
-    sec_filings_details = []
+    offering_acc = None
+    filings = []
+    news_items = []
     catalysts = []
     cik_str_val = None
 
@@ -277,8 +466,10 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                                 pass
 
                         brief_desc = get_form_description(f_form, desc, item_val, doc_text)
-                        if len(sec_filings_details) < 4:
-                            sec_filings_details.append(f"• <b>{f_form}</b> ({f_date}): <a href='{filing_url}'>{brief_desc}</a>")
+                        filings.append({
+                            "form": f_form, "items": str(item_val), "date": f_date, "url": filing_url,
+                            "accession": acc_num, "desc": desc, "brief": brief_desc,
+                        })
 
                         if check_split and not split_info and f_upper in ["6-K", "8-K", "DEF 14A", "PRE 14A", "424B5", "424B3"]:
                             if doc_text:
@@ -290,8 +481,10 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                                     r_val = ratio_match.group(1) or ratio_match.group(2)
                                     d_str = date_match.group(1) if date_match else f_date
                                     split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
+                                    split_acc = acc_num
                                 elif "reverse split" in text_clean.lower():
                                     split_info = f"معلن بإفصاح {f_form} بتاريخ {f_date}"
+                                    split_acc = acc_num
 
                         if not offering_info and (f_upper.startswith("424B") or f_upper.startswith("S-") or f_upper.startswith("F-") or f_upper in ["8-K", "6-K"]):
                             if doc_text:
@@ -314,25 +507,8 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                                 offering_info = f"نشرة طرح/إعادة بيع معلنة ({f_form} {f_date})"
 
                             if offering_info:
+                                offering_acc = acc_num
                                 offering_info = f"<a href='{filing_url}'>{offering_info}</a>"
-
-                        desc_lower = desc.lower()
-                        catalysts_before = len(catalysts)
-                        if "1.01" in str(item_val) or "entry into a material definitive agreement" in desc_lower:
-                            catalysts.append(f"اتفاقية جوهرية جديدة (8-K {f_date})")
-                        elif "2.02" in str(item_val) or "results of operations" in desc_lower or "earnings" in desc_lower:
-                            catalysts.append(f"إعلان نتائج مالية وأرباح (8-K {f_date})")
-                        elif "fda" in desc_lower or "pdufa" in desc_lower or "approval" in desc_lower:
-                            catalysts.append(f"موافقة/إفصاح FDA (إفصاح {f_form} {f_date})")
-                        elif "patent" in desc_lower:
-                            catalysts.append(f"براءة اختراع جديدة (إفصاح {f_form} {f_date})")
-                        elif "trial" in desc_lower or "phase" in desc_lower:
-                            catalysts.append(f"تجارب سريرية (إفصاح {f_form} {f_date})")
-                        elif "contract" in desc_lower or "partnership" in desc_lower:
-                            catalysts.append(f"عقد/شراكة استراتيجية (إفصاح {f_form} {f_date})")
-
-                        if len(catalysts) > catalysts_before:
-                            catalysts[-1] = f"<a href='{filing_url}'>{catalysts[-1]}</a>"
 
     except Exception as e:
         print(f"⚠️ خطأ جلب بيانات SEC لـ {symbol}: {e}")
@@ -341,26 +517,45 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
         rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
         rss_res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
         if rss_res.status_code == 200:
-            titles = re.findall(r'<title>(.*?)</title>', rss_res.text)
-            links = re.findall(r'<link>(.*?)</link>', rss_res.text)
-            for n, t in enumerate(titles[1:8], start=1):
-                clean_t = t.replace("&quot;", '"').replace("&amp;", "&")
-                if len(clean_t) > 65:
-                    clean_t = clean_t[:62] + "..."
-                news_link = links[n].strip() if n < len(links) else None
-                
-                clean_t_ar = translate_to_arabic(clean_t)
-                
-                if news_link:
-                    catalysts.append(f"<a href='{news_link}'>خبر: {clean_t_ar}</a>")
-                else:
-                    catalysts.append(f"خبر: {clean_t_ar}")
+            for item_xml in re.findall(r'<item>(.*?)</item>', rss_res.text, re.DOTALL)[:7]:
+                t_m = re.search(r'<title>(.*?)</title>', item_xml, re.DOTALL)
+                l_m = re.search(r'<link>(.*?)</link>', item_xml, re.DOTALL)
+                d_m = re.search(r'<pubDate>(.*?)</pubDate>', item_xml, re.DOTALL)
+                if not t_m:
+                    continue
+                clean_t = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', t_m.group(1), flags=re.DOTALL)
+                clean_t = html.unescape(clean_t).strip()
+                if not clean_t:
+                    continue
+                news_link = l_m.group(1).strip() if l_m else None
+                news_items.append({
+                    "title": clean_t, "url": news_link or None,
+                    "date": _parse_news_date(d_m.group(1)) if d_m else datetime.now(NEW_YORK).strftime("%Y-%m-%d"),
+                    "source": "Yahoo",
+                })
     except Exception as e:
         print(f"⚠️ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
 
-    sec_summary = "\n".join(sec_filings_details) if sec_filings_details else "• لا توجد إفصاحات حديثة"
+    # خبر TradingView الأحدث يظهر في سطر Latest updates، فلا يتكرر داخل المحفزات
+    tv_latest = _TV_LATEST.get(symbol)
+    if tv_latest:
+        news_items = [n for n in news_items if not _same_story(tv_latest["title"], n["title"])]
+
+    sections = build_alert_sections(
+        filings, news_items,
+        skip_events_acc={split_acc, offering_acc},
+        skip_sec_acc={offering_acc},
+    )
+
+    catalysts.extend(sections["corp"])
+    catalysts.extend(sections["catalysts"])
+
+    if sections["issuance"]:
+        offering_info = "\n".join(([offering_info] if offering_info else []) + sections["issuance"])
+
+    sec_summary = "\n".join(sections["sec"]) if sections["sec"] else "• لا توجد إفصاحات حديثة"
     unique_catalysts = list(dict.fromkeys(catalysts))
-    catalyst_str = " | ".join(unique_catalysts[:4]) if unique_catalysts else "لا توجد محفزات رصدت مؤخراً"
+    catalyst_str = "\n".join(unique_catalysts) if unique_catalysts else "لا توجد محفزات رصدت مؤخراً"
 
     return split_info, offering_info, sec_summary, catalyst_str, cik_str_val
 
@@ -546,7 +741,7 @@ def main():
                 lines.append(f"📉 <b>Reverse Split:</b> {split_sched or 'لا توجد جدولة'}")
 
             lines.append(f"📋 <b>الإصدارات:</b> {warrants_info or 'لا توجد إصدارات معلنة'}")
-            lines.append(f"⚡ <b>المحفزات والأخبار (حتى 4):</b>\n{catalyst_str}")
+            lines.append(f"⚡ <b>المحفزات والأخبار:</b>\n{catalyst_str}")
             lines.append(f"📲 <b>Latest updates:</b> {latest_updates}")
             lines.append(f"📄 <b>إفصاحات SEC:</b>\n{sec_summary}")
             
