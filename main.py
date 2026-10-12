@@ -2,6 +2,7 @@ import os
 import json
 import re
 import html
+import time
 import requests
 import urllib.parse
 from datetime import datetime
@@ -23,14 +24,16 @@ MAX_SHOWN = 20
 _TV_LATEST = {}
 
 # ================================
-# دالة ترجمة للنصوص (من الإنجليزية إلى العربية)
+# دالة ترجمة للنصوص (مع التأخير لتفادي الحظر)
 # ================================
 def translate_to_arabic(text):
     if not text:
         return text
     try:
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q={urllib.parse.quote(text)}"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(url, headers=headers, timeout=3)
+        time.sleep(0.15)  # تأخير بسيط لمنع حظر الطلبات المباشرة من Google Translate
         if res.status_code == 200:
             result = res.json()
             translated = "".join([item[0] for item in result[0] if item[0]])
@@ -40,33 +43,7 @@ def translate_to_arabic(text):
     return text
 
 # ================================
-# إدارة ملف التكرارات والتحقق اليومي
-# ================================
-def load_seen():
-    today = datetime.now(RIYADH).strftime("%Y-%m-%d")
-    try:
-        if os.path.exists(SEEN_FILE):
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("date") == today:
-                return today, data.get("counts", {})
-    except Exception as e:
-        print(f"⚠️ خطأ في قراءة ملف السجل: {e}")
-    return today, {}
-
-def save_seen(today, counts):
-    try:
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "date": today,
-                "counts": counts,
-                "last_update": datetime.now(RIYADH).strftime("%H:%M:%S")
-            }, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ خطأ في حفظ ملف السجل: {e}")
-
-# ================================
-# تحديد نوع الجلسة بدقة بتوقيت نيويورك وتوقيت الرياض
+# إدارة ملف التكرارات والتحقق حسب الجلسة
 # ================================
 def get_current_session():
     now_ny = datetime.now(NEW_YORK)
@@ -88,6 +65,34 @@ def get_current_session():
         return "postmarket", "🌙 Post-Market (ما بعد الإغلاق)"
     else:
         return "closed", "⏸️ المغلق (خارج أوقات التداول)"
+
+def load_seen():
+    today = datetime.now(RIYADH).strftime("%Y-%m-%d")
+    session_key, _ = get_current_session()
+    try:
+        if os.path.exists(SEEN_FILE):
+            with open(SEEN_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # التحقق من أن التاريخ والجلسة تطابق الحالية لضمان إعادة التصفية لكل جلسة جديدة
+            if data.get("date") == today and data.get("session") == session_key:
+                return data.get("stocks", {})
+    except Exception as e:
+        print(f"⚠️ خطأ في قراءة ملف السجل: {e}")
+    return {}
+
+def save_seen(stocks_data):
+    today = datetime.now(RIYADH).strftime("%Y-%m-%d")
+    session_key, _ = get_current_session()
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "date": today,
+                "session": session_key,
+                "stocks": stocks_data,
+                "last_update": datetime.now(RIYADH).strftime("%H:%M:%S")
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ خطأ في حفظ ملف السجل: {e}")
 
 # ================================
 # جلب أحدث الأخبار المباشرة لـ TradingView
@@ -318,26 +323,27 @@ def _render_event(ev, prefix="• "):
     line = f'{prefix}{text} <code>{ev["date"]}</code>'
     return f"{line} — {links}" if links else line
 
-def build_alert_sections(filings, news_items, sec_limit=4, cat_limit=5, skip_events_acc=(), skip_sec_acc=()):
-    """يدمج SEC + الأخبار: كل حدث يظهر مرة واحدة وتتجمع مصادره في سطر واحد"""
+def build_alert_sections(filings, news_items, sec_limit=4, cat_limit=5, skip_events_acc=(), skip_sec_acc=(), has_split_header=False):
     events = []
 
-    # 1) الأخبار: نفس القصة من أكثر من مصدر = حدث واحد
     for n in news_items:
+        kind = _news_kind(n["title"])
+        if has_split_header and kind == "reverse_split":
+            continue
+
         src = n.get("source") or "News"
         target = next((e for e in events if e["title"] and _same_story(e["title"], n["title"])), None)
         if target:
             if src not in [x[0] for x in target["links"]]:
                 target["links"].append((src, n["url"]))
             continue
-        events.append({"kind": _news_kind(n["title"]), "date": n["date"], "title": n["title"],
+        events.append({"kind": kind, "date": n["date"], "title": n["title"],
                        "label": "", "links": [(src, n["url"])], "acc": None, "note": None})
 
-    # 2) الإفصاحات: تُدمج مع خبر من نفس النوع (±3 أيام) وإلا تظهر وحدها مرة لكل نوع
     seen_alone = set()
     for f in filings:
         kind, alone = _filing_kind(f)
-        if not kind:
+        if not kind or (has_split_header and kind == "reverse_split"):
             continue
         target = next((e for e in events if e["kind"] == kind and e["acc"] is None and e["title"]
                        and _days_apart(e["date"], f["date"]) <= 3), None)
@@ -351,7 +357,6 @@ def build_alert_sections(filings, news_items, sec_limit=4, cat_limit=5, skip_eve
             events.append({"kind": kind, "date": f["date"], "title": None, "label": _filing_label(f, kind),
                            "links": [(f["form"], f["url"])], "acc": f["accession"], "note": None})
 
-    # 3) التوزيع على الأقسام (الأحداث المصنّفة أولاً ثم الأحدث تاريخاً)
     skip_events_acc = {a for a in skip_events_acc if a}
     skip_sec_acc = {a for a in skip_sec_acc if a}
     ordered = sorted(events, key=lambda e: e["date"], reverse=True)
@@ -370,7 +375,6 @@ def build_alert_sections(filings, news_items, sec_limit=4, cat_limit=5, skip_eve
     if omitted > 0:
         catalyst_lines.append(f"➕ {omitted} أخبار/أحداث أخرى غير معروضة")
 
-    # 4) إفصاحات SEC التي لم تظهر أعلاه (نموذج واحد لكل يوم)
     shown = {e["acc"] for e in corp + issuance + cats if e["acc"]} | skip_sec_acc
     counts = {}
     for f in filings:
@@ -474,17 +478,20 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                         if check_split and not split_info and f_upper in ["6-K", "8-K", "DEF 14A", "PRE 14A", "424B5", "424B3"]:
                             if doc_text:
                                 text_clean = re.sub('<[^<]+?>', ' ', doc_text)
-                                ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
-                                date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
+                                if not ("effectuated" in text_clean.lower() or "effected" in text_clean.lower()):
+                                    ratio_match = re.search(r'(?:ratio\s+of\s+|ratio\s*)?1\s*[-:\s]\s*for\s*[-:\s]*(\d+)|1\s*[:/]\s*(\d+)\s*reverse', text_clean, re.IGNORECASE)
+                                    date_match = re.search(r'(?:effective|scheduled|expected|execution)\s*(?:on|date)?\s*([A-Za-z]+\s+\d{1,2},\s*\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', text_clean, re.IGNORECASE)
 
-                                if ratio_match:
-                                    r_val = ratio_match.group(1) or ratio_match.group(2)
-                                    d_str = date_match.group(1) if date_match else f_date
-                                    split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
-                                    split_acc = acc_num
-                                elif "reverse split" in text_clean.lower():
-                                    split_info = f"معلن بإفصاح {f_form} بتاريخ {f_date}"
-                                    split_acc = acc_num
+                                    if ratio_match:
+                                        r_val = ratio_match.group(1) or ratio_match.group(2)
+                                        d_str = date_match.group(1) if date_match else f_date
+                                        try:
+                                            parsed_dt = datetime.strptime(d_str.strip(), "%Y-%m-%d").date()
+                                            if parsed_dt >= datetime.now(RIYADH).date():
+                                                split_info = f"مجدول (1:{r_val}) بتاريخ {d_str} (إفصاح {f_form})"
+                                                split_acc = acc_num
+                                        except Exception:
+                                            pass
 
                         if not offering_info and (f_upper.startswith("424B") or f_upper.startswith("S-") or f_upper.startswith("F-") or f_upper in ["8-K", "6-K"]):
                             if doc_text:
@@ -517,12 +524,22 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
         rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
         rss_res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
         if rss_res.status_code == 200:
-            for item_xml in re.findall(r'<item>(.*?)</item>', rss_res.text, re.DOTALL)[:7]:
+            today_ny = datetime.now(NEW_YORK).date()
+            for item_xml in re.findall(r'<item>(.*?)</item>', rss_res.text, re.DOTALL)[:10]:
                 t_m = re.search(r'<title>(.*?)</title>', item_xml, re.DOTALL)
                 l_m = re.search(r'<link>(.*?)</link>', item_xml, re.DOTALL)
                 d_m = re.search(r'<pubDate>(.*?)</pubDate>', item_xml, re.DOTALL)
                 if not t_m:
                     continue
+                
+                news_date_str = _parse_news_date(d_m.group(1)) if d_m else today_ny.strftime("%Y-%m-%d")
+                try:
+                    n_dt = datetime.strptime(news_date_str, "%Y-%m-%d").date()
+                    if (today_ny - n_dt).days > 7:
+                        continue
+                except Exception:
+                    pass
+
                 clean_t = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', t_m.group(1), flags=re.DOTALL)
                 clean_t = html.unescape(clean_t).strip()
                 if not clean_t:
@@ -530,13 +547,12 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
                 news_link = l_m.group(1).strip() if l_m else None
                 news_items.append({
                     "title": clean_t, "url": news_link or None,
-                    "date": _parse_news_date(d_m.group(1)) if d_m else datetime.now(NEW_YORK).strftime("%Y-%m-%d"),
+                    "date": news_date_str,
                     "source": "Yahoo",
                 })
     except Exception as e:
         print(f"⚠️ خطأ جلب أخبار Yahoo لـ {symbol}: {e}")
 
-    # خبر TradingView الأحدث يظهر في سطر Latest updates، فلا يتكرر داخل المحفزات
     tv_latest = _TV_LATEST.get(symbol)
     if tv_latest:
         news_items = [n for n in news_items if not _same_story(tv_latest["title"], n["title"])]
@@ -545,6 +561,7 @@ def fetch_sec_filings_and_catalysts(symbol, check_split=True, change_pct=0.0):
         filings, news_items,
         skip_events_acc={split_acc, offering_acc},
         skip_sec_acc={offering_acc},
+        has_split_header=bool(split_info)
     )
 
     catalysts.extend(sections["corp"])
@@ -677,7 +694,6 @@ def send_in_chunks(header, blocks):
 # التنفيذ لمرة واحدة (Single Run)
 # ================================
 def main():
-    today, counts = load_seen()
     now_str = datetime.now(RIYADH).strftime("%H:%M:%S")
     session_key, session_name = get_current_session()
 
@@ -689,6 +705,7 @@ def main():
     stocks = fetch_filtered_stocks(session_key)
 
     if stocks:
+        session_stocks = load_seen()
         header = (
             f"🇺🇸 <b>رادار الأسهم الأمريكية</b>\n"
             f"⏱️ <b>الجلسة:</b> {session_name} | <code>{now_str} KSA</code>\n"
@@ -714,17 +731,47 @@ def main():
 
             latest_updates = fetch_tradingview_latest_updates(symbol, exchange)
 
-            curr_count = counts.get(symbol, 0) + 1
-            counts[symbol] = curr_count
-
-            alert_title = "🚨 Alert" if curr_count == 1 else f"🚨 Alert {curr_count}"
-            tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
-
             split_sched, warrants_info, sec_summary, catalyst_str, cik_code = fetch_sec_filings_and_catalysts(
                 symbol, 
                 check_split=(price < 1.0),
                 change_pct=change_pct
             )
+
+            # التحقق من شروط الإرسال لتجنب كثرة التنبيهات المتكررة
+            should_send = False
+            alert_count = 1
+
+            if symbol not in session_stocks:
+                should_send = True
+                alert_count = 1
+            else:
+                prev_data = session_stocks[symbol]
+                prev_price = prev_data.get("price", 0)
+                prev_catalyst = prev_data.get("catalyst", "")
+                prev_count = prev_data.get("count", 1)
+
+                # الشرط: إعادة الإرسال فقط إذا ارتفع السعر أو ظهر خبر/محفز جديد
+                price_increased = price > prev_price
+                new_catalyst = catalyst_str != prev_catalyst
+
+                if price_increased or new_catalyst:
+                    should_send = True
+                    alert_count = prev_count + 1
+                else:
+                    should_send = False
+
+            if not should_send:
+                continue  # تخطي السهم لعدم وجود تغيير يستدعي التنبيه
+
+            # تحديث حالة السهم في سجل الجلسة الحالية
+            session_stocks[symbol] = {
+                "count": alert_count,
+                "price": price,
+                "catalyst": catalyst_str
+            }
+
+            alert_title = "🚨 Alert" if alert_count == 1 else f"🚨 Alert {alert_count}"
+            tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
 
             if cik_code:
                 sec_browse_url = f"https://www.sec.gov/edgar/browse/?CIK={cik_code}"
@@ -751,9 +798,12 @@ def main():
             ])
             blocks.append("\n".join(lines))
 
-        save_seen(today, counts)
-        send_in_chunks(header, blocks)
-        print(f"✅ تم إرسال {len(blocks)} سهم بنجاح.")
+        save_seen(session_stocks)
+        if blocks:
+            send_in_chunks(header, blocks)
+            print(f"✅ تم إرسال {len(blocks)} سهم جديد/محدث بنجاح.")
+        else:
+            print(f"ℹ [{now_str}] لا توجد تغييرات أو أسهم جديدة تستدعي الإرسال في هذه الدورة.")
     else:
         print(f"ℹ [{now_str}] لا توجد أسهم تطابق الشروط حالياً.")
 
