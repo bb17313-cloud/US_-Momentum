@@ -2,13 +2,17 @@ name: US Momentum Tracker
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: us-momentum
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -23,13 +27,37 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests tradingview-screener
 
+      - name: Restore seen_stocks
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_stocks.json
+          key: seen-${{ github.run_id }}
+          restore-keys: |
+            seen-
+
       - name: Run Momentum Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          end=$((SECONDS+300))
+          end=$((SECONDS+870))
           while [ $SECONDS -lt $end ]; do
+            start=$SECONDS
             python main.py
-            sleep 90
+
+            session=$(python -c "from main import get_current_session; print(get_current_session()[0])")
+            [ "$session" = "closed" ] && break
+
+            if [ "$session" = "postmarket" ]; then interval=60; else interval=180; fi
+            elapsed=$((SECONDS-start))
+            wait=$((interval-elapsed))
+            [ $((SECONDS+wait)) -ge $end ] && break
+            [ $wait -gt 0 ] && sleep $wait
           done
+
+      - name: Save seen_stocks
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen_stocks.json
+          key: seen-${{ github.run_id }}
