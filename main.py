@@ -242,12 +242,12 @@ def fetch_filtered_stocks(session_type):
         {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000},
         {"left": volume_field, "operation": "greater", "right": 15_000 if session_type in ("premarket", "postmarket") else 30_000},
         {"left": change_field, "operation": "greater", "right": 2.0},
-        {"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000},
         {"left": "close", "operation": "less", "right": 50.0},
         {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}
     ]
 
     if session_type == "market":
+        filters.append({"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000})
         filters.append({"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.2})
 
     payload = {
