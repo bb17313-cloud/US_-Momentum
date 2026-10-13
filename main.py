@@ -240,7 +240,7 @@ def fetch_filtered_stocks(session_type):
 
     filters = [
         {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000},
-        {"left": volume_field, "operation": "greater", "right": 30_000},
+        {"left": volume_field, "operation": "greater", "right": 15_000 if session_type in ("premarket", "postmarket") else 30_000},
         {"left": change_field, "operation": "greater", "right": 2.0},
         {"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000},
         {"left": "close", "operation": "less", "right": 50.0},
