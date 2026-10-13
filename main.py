@@ -17,7 +17,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "")
 RIYADH = ZoneInfo("Asia/Riyadh")
 NEW_YORK = ZoneInfo("America/New_York")
 SEEN_FILE = "seen_stocks.json"
-MAX_SHOWN = 20
+MAX_SHOWN = 40   # ← تم رفعه إلى 40
 
 # ================================
 # إدارة جلسات السوق الثلاث
@@ -239,7 +239,7 @@ def fetch_filtered_stocks(session_type):
     ]
 
     filters = [
-        {"left": "float_shares_outstanding_current", "operation": "less", "right": 500_000_000},
+        {"left": "float_shares_outstanding_current", "operation": "less", "right": 1_000_000_000},  # ← 1 مليار
         {"left": "close", "operation": "less", "right": 50.0},
         {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}
     ]
@@ -256,7 +256,7 @@ def fetch_filtered_stocks(session_type):
         filters.append({"left": "volume", "operation": "greater", "right": 30_000})
         filters.append({"left": "change", "operation": "greater", "right": 2.0})
         filters.append({"left": "average_volume_10d_calc", "operation": "greater", "right": 50_000})
-        filters.append({"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.2})
+        filters.append({"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.0})  # ← تم تخفيضه إلى 1.0
         sort_by = "change"
 
     payload = {
