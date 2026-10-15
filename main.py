@@ -410,10 +410,11 @@ def main():
                 prev_acc = prev_data.get("latest_acc", "")
                 prev_count = prev_data.get("count", 1)
 
-                price_increased = price > prev_price
+                # السماح بالتحديث إذا تحرك السعر بنسبة مئوية (صعوداً أو هبوطاً) >= 1% أو صدر إفصاح جديد
+                price_change_from_prev = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0
                 new_filing = latest_acc != prev_acc
 
-                if price_increased or new_filing:
+                if abs(price_change_from_prev) >= 1.0 or new_filing:
                     should_send = True
                     alert_count = prev_count + 1
                 else:
