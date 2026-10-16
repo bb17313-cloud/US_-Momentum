@@ -5,6 +5,10 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
 concurrency:
   group: us-momentum
   cancel-in-progress: false
@@ -61,3 +65,12 @@ jobs:
         with:
           path: seen_stocks.json
           key: seen-${{ github.run_id }}
+
+      - name: Re-trigger workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          session=$(python -c "from main import get_current_session; print(get_current_session()[0])" || echo "unknown")
+          if [ "$session" != "closed" ]; then
+            gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}"
+          fi
